@@ -1,0 +1,14 @@
+services:
+  pet-recognition:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    environment:
+      PET_PROVIDER: CUDAExecutionProvider
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

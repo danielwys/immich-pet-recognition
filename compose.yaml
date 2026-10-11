@@ -1,0 +1,27 @@
+name: immich-pet-recognition
+services:
+  pet-recognition:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      PET_IMMICH_URL: ${PET_IMMICH_URL:-http://immich-server:2283}
+      PET_IMMICH_API_KEY: ${PET_IMMICH_API_KEY:?Set the Immich API key in .env}
+      PET_SERVICE_TOKEN: ${PET_SERVICE_TOKEN:?Set a service token in .env}
+      PET_AUTO_TAG: ${PET_AUTO_TAG:-false}
+      PET_POLL_SECONDS: ${PET_POLL_SECONDS:-300}
+      PET_MATCH_THRESHOLD: ${PET_MATCH_THRESHOLD:-0.85}
+      PET_MATCH_MARGIN: ${PET_MATCH_MARGIN:-0.08}
+      PET_MIN_REFERENCES: ${PET_MIN_REFERENCES:-10}
+      PET_DETECTOR_THRESHOLD: ${PET_DETECTOR_THRESHOLD:-0.5}
+    volumes:
+      - pet-data:/data
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    stop_grace_period: 90s
+volumes:
+  pet-data:

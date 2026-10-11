@@ -1,0 +1,1 @@
+"""Immich pet recognition companion."""

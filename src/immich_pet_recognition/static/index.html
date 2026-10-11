@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Immich Pet Recognition</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="/"
+        ><span class="brand-icon" aria-hidden="true">✦</span
+        ><span>Pet recognition<small>FOR YOUR IMMICH LIBRARY</small></span></a
+      >
+      <div class="nav-label">YOUR WORKSPACE</div>
+      <nav aria-label="Workspace">
+        <button class="nav active" data-panel="review">
+          <span>Review queue</span
+          ><span id="nav-count" class="nav-count">0</span>
+        </button>
+        <button class="nav" data-panel="pets">Pet gallery</button>
+        <button class="nav" data-panel="processing">Processing</button>
+        <button class="nav" data-panel="setup">Setup &amp; connection</button>
+      </nav>
+      <div class="sidebar-note">
+        <span class="dot"></span
+        ><strong id="mode-label">Checking connection</strong>
+        <p id="mode-description">
+          Your photos, processed on your own hardware.
+        </p>
+      </div>
+      <div class="sidebar-footer">
+        A companion for Immich<small>v0.1.0 · Pet recognition</small>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <span>YOUR PHOTO LIBRARY / <strong id="breadcrumb">REVIEW</strong></span
+        ><button id="refresh" class="quiet">↻ Refresh</button>
+      </header>
+      <div id="demo-banner" class="banner hidden">
+        OFFLINE DEMO
+        <span
+          >Illustrations and simulated scores. No Immich connection or real
+          inference.</span
+        >
+      </div>
+      <div id="error-banner" class="banner error hidden" role="alert"></div>
+      <section class="page-intro">
+        <div>
+          <span class="eyebrow">A LITTLE HELP FINDING THE FAMILIAR</span>
+          <h1 id="page-title">Every photo. Your pet.</h1>
+          <p id="page-description">
+            Review the animals we found, and tell us who belongs to your family.
+          </p>
+        </div>
+        <button id="sync" class="primary">
+          Sync library <span aria-hidden="true">↗</span>
+        </button>
+      </section>
+      <section class="stats" aria-label="Library status">
+        <div>
+          <span>Waiting for review</span><strong id="stat-pending">—</strong
+          ><small>Your eye makes the difference</small>
+        </div>
+        <div>
+          <span>Confirmed matches</span><strong id="stat-confirmed">—</strong
+          ><small>Ready to find in Immich</small>
+        </div>
+        <div>
+          <span>Photos in queue</span><strong id="stat-queued">—</strong
+          ><small>Processed one at a time</small>
+        </div>
+        <div>
+          <span>Registered pets</span><strong id="stat-pets">—</strong
+          ><small>A gallery of familiar faces</small>
+        </div>
+      </section>
+      <section id="review-panel" class="panel">
+        <div class="section-heading">
+          <div>
+            <h2>A few familiar faces?</h2>
+            <p>
+              Similarity is a comparison score, not a certainty. You make the
+              final call.
+            </p>
+          </div>
+          <span id="review-total" class="pill">0 detections</span>
+        </div>
+        <div class="toolbar">
+          <div class="filters" aria-label="Review filter">
+            <button data-filter="pending" class="selected" aria-pressed="true">
+              To review</button
+            ><button data-filter="confirmed" aria-pressed="false">
+              Confirmed</button
+            ><button data-filter="rejected" aria-pressed="false">
+              Dismissed</button
+            ><button data-filter="all" aria-pressed="false">All</button>
+          </div>
+          <label class="pet-picker"
+            >Review as
+            <select id="active-pet" aria-label="Pet to review as">
+              <option value="">Register a pet first</option>
+            </select></label
+          >
+        </div>
+        <div id="review-grid" class="review-grid"></div>
+        <div class="pagination">
+          <button id="previous" class="secondary">← Previous</button
+          ><span id="page-range"></span
+          ><button id="next" class="secondary">Next →</button>
+        </div>
+        <div class="tip">
+          <span aria-hidden="true">✦</span>
+          <p>
+            <strong>Start with a reference gallery.</strong> Add varied, clear
+            crops of your pet. Add similar-looking animals as negative examples.
+            Automatic tagging starts off.
+          </p>
+          <button class="quiet" data-panel="pets">Manage pets →</button>
+        </div>
+      </section>
+      <section id="pets-panel" class="panel hidden">
+        <div class="section-heading">
+          <div>
+            <h2>Your family, one pet at a time.</h2>
+            <p>
+              Register a pet, then add reference crops from the review queue.
+            </p>
+          </div>
+        </div>
+        <form id="pet-form" class="form-row">
+          <label
+            >Pet's name<input
+              id="pet-name"
+              maxlength="64"
+              required
+              placeholder="e.g. Mochi"
+              autocomplete="off" /></label
+          ><label
+            >Species<select id="pet-species">
+              <option value="dog">Dog</option>
+              <option value="cat">Cat</option>
+            </select></label
+          ><button class="primary" type="submit">Register pet</button>
+        </form>
+        <div id="pet-grid" class="pet-grid"></div>
+        <div class="tip">
+          <p>
+            <strong>A good first gallery: 30–50 photos.</strong> Include
+            different angles, lighting, ages, and grooming. Keep a separate set
+            of photos for checking accuracy before turning on automatic tagging.
+          </p>
+        </div>
+      </section>
+      <section id="processing-panel" class="panel hidden">
+        <div class="section-heading">
+          <div>
+            <h2>Quiet work in the background.</h2>
+            <p>
+              Queued photos survive restarts. Failed jobs retry before asking
+              for your attention.
+            </p>
+          </div>
+          <button id="retry" class="secondary">Retry failures</button>
+        </div>
+        <div class="actions">
+          <button id="backfill" class="primary">Scan existing library</button
+          ><button id="rematch" class="secondary">Recheck cached crops</button>
+        </div>
+        <div id="job-list" class="job-list"></div>
+      </section>
+      <section id="setup-panel" class="panel hidden">
+        <div class="section-heading">
+          <div>
+            <h2>A service of its own.</h2>
+            <p>
+              Immich manages your library. This companion finds and identifies
+              your pets.
+            </p>
+          </div>
+        </div>
+        <div id="setup-info" class="setup-grid"></div>
+        <div class="tip">
+          <p>
+            Configure the Immich URL, API key, and service token in your Compose
+            environment. The Immich API key stays on the server. Run one
+            instance against one Immich account.
+          </p>
+        </div>
+        <button id="logout" class="secondary">
+          Forget service token in this tab
+        </button>
+      </section>
+      <footer class="main-footer">
+        <span id="last-sync">Waiting for first sync</span
+        ><span id="tagging-state">Human review comes first</span>
+      </footer>
+    </main>
+    <dialog id="login-dialog">
+      <form id="login-form">
+        <span class="eyebrow">YOUR PRIVATE WORKSPACE</span>
+        <h2>Connect to the companion</h2>
+        <p>
+          Enter PET_SERVICE_TOKEN from your service environment. This is
+          separate from your Immich API key.
+        </p>
+        <label
+          >Service token<input
+            id="service-token"
+            type="password"
+            required
+            autocomplete="off"
+        /></label>
+        <p id="login-error" class="error-text" role="alert"></p>
+        <button class="primary" type="submit">Connect</button>
+      </form>
+    </dialog>
+    <div id="toast" role="status" class="toast hidden"></div>
+  </body>
+</html>
