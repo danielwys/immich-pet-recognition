@@ -11,6 +11,8 @@ emits one upstream Starlette/httpx deprecation warning; it does not affect the p
   retained reference re-embedding, atomic queue claims, partial-sync checkpoint preservation,
   background-worker publication, and isolation between real and demo data directories.
 - Ruff lint and formatting checks.
+- GitHub Actions passed the test/lint suite and built both CPU and CUDA Docker images on Linux.
+  See the [successful initial run](https://github.com/danielwys/immich-pet-recognition/actions/runs/38131299043).
 - Real CPU inference using the pinned RF-DETR Nano and **Pet Recognition Large** ONNX files
   against Roboflow's public [dog sample](https://media.roboflow.com/dog.jpg), linked in the
   [upstream README](https://github.com/roboflow/rf-detr/blob/develop/README.md).
@@ -24,11 +26,11 @@ emits one upstream Starlette/httpx deprecation warning; it does not affect the p
 
 ## Still requires the NAS
 
-- Both CPU and CUDA container builds (Docker is unavailable in the current local environment).
 - NVIDIA driver/container access and actual CUDA model execution on the RTX 3080.
 - Live Immich 3.3.1 API key permissions, connectivity, preview retrieval, and tag writeback.
 - Identity accuracy and thresholds on a held-out set of the user's pet photos.
 
 The automated suite mocks Immich's responses and model stages. The real-model smoke test checks
 the published model contract and execution, not individual-pet recognition accuracy. The GitHub
-workflow is configured to run tests and build both container variants when the repository is pushed.
+workflow runs tests and builds both container variants on pushes and pull requests. A successful
+CUDA image build does not verify GPU execution; the hosted runner has no RTX 3080.
