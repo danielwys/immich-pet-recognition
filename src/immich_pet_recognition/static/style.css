@@ -1299,3 +1299,62 @@ progress::-webkit-progress-value {
     grid-template-columns: 1fr;
   }
 }
+
+.recheck-card {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 9px;
+  padding: 14px 18px;
+  margin-bottom: 18px;
+}
+.recheck-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.recheck-heading strong {
+  font-size: 14px;
+}
+.recheck-card p {
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 5px;
+}
+.recheck-card progress {
+  height: 8px;
+  margin: 10px 0 2px;
+}
+.recheck-card.is-failed {
+  border-color: #dc2626;
+}
+.review-breakdown {
+  margin-top: 9px;
+  font-size: 12px;
+  color: #475569;
+}
+.review-breakdown summary {
+  cursor: pointer;
+  width: fit-content;
+}
+#review-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 20px;
+  margin: 10px 0;
+}
+#review-reasons:empty {
+  display: none;
+}
+.review-reason strong {
+  color: var(--ink);
+  margin-right: 5px;
+}
+@media (max-width: 700px) {
+  .recheck-card {
+    padding: 12px;
+  }
+  .recheck-heading {
+    align-items: start;
+  }
+}

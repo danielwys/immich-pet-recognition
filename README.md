@@ -93,7 +93,15 @@ for a separate accuracy check. Model-generated automatic matches never add their
 
 Suggestions for visible photos use the latest cached example vectors immediately. A background
 pass refreshes rankings across the library without downloading photos or running detection again.
-The UI shows when that pass is pending. Manual decisions and published tags survive rematching.
+The status above the review tabs shows **queued**, **preparing**, **rechecking** with a percentage
+and checked/total crop count, **complete**, or **failed** with a retry control. The percentage
+measures that pass, not the proportion of photos tagged. Completion is saved across restarts;
+an interrupted pass resumes as queued. Manual decisions and published tags survive rematching.
+The main counters count unique **untagged photos** and **tagged photos**, rather than animal
+crops. Expand **Why are photos still untagged?** to see crop counts, extra unassigned animals
+inside already-tagged photos, and the first unmet matching check for each pending crop.
+Tag changes waiting to sync to Immich are shown separately. Repeating a recheck with unchanged
+examples does not improve matching scores; uncertain matches need assignments or more varied examples.
 Use **Not [pet]** to exclude that identity while leaving the crop available for another pet;
 **Dismiss** removes the crop from the pending queue without guessing a negative identity.
 

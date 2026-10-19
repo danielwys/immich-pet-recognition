@@ -16,7 +16,7 @@
       <div class="nav-label">YOUR WORKSPACE</div>
       <nav aria-label="Workspace">
         <button class="nav active" data-panel="review">
-          <span>Review queue</span
+          <span>Review photos</span
           ><span id="nav-count" class="nav-count">0</span>
         </button>
         <button class="nav" data-panel="pets">Pets &amp; automation</button>
@@ -62,29 +62,52 @@
       </section>
       <section class="stats" aria-label="Library status">
         <div>
-          <span>Animals awaiting identity</span
-          ><strong id="stat-pending">—</strong
-          ><small>Below the checks, or automation off</small>
+          <span>Untagged photos</span><strong id="stat-pending">—</strong
+          ><small>Photos without a pet tag</small>
         </div>
         <div>
-          <span>Assigned animals</span><strong id="stat-confirmed">—</strong
-          ><small>Manual + automatic assignments</small>
+          <span>Tagged photos</span><strong id="stat-confirmed">—</strong
+          ><small>Manual + automatic tags in Immich</small>
         </div>
         <div>
-          <span>Photos in queue</span><strong id="stat-queued">—</strong
-          ><small>Processed one at a time</small>
+          <span>Photos processing</span><strong id="stat-queued">—</strong
+          ><small>New photos waiting for detection</small>
         </div>
         <div>
           <span>Registered pets</span><strong id="stat-pets">—</strong
           ><small>A gallery of familiar faces</small>
         </div>
       </section>
+      <section class="recheck-card" aria-label="Recheck progress">
+        <div class="recheck-heading">
+          <div role="status">
+            <strong id="recheck-title">Checking recheck status…</strong>
+            <p id="recheck-detail"></p>
+          </div>
+          <button id="recheck-now" class="secondary">Recheck now</button>
+        </div>
+        <progress
+          id="recheck-progress"
+          max="100"
+          aria-label="Recheck progress"
+          class="hidden"
+        ></progress>
+        <p id="recheck-next"></p>
+        <p id="tag-sync-status" class="hidden"></p>
+        <details id="review-breakdown" class="review-breakdown">
+          <summary>Why are photos still untagged?</summary>
+          <p id="review-count-explanation"></p>
+          <div id="review-reasons"></div>
+          <p id="review-next-step"></p>
+        </details>
+      </section>
       <section id="review-panel" class="panel">
         <div class="section-heading">
           <div>
             <h2>Teach, automate, and review.</h2>
             <p id="suggestion-state" role="status">
-              Checking your example galleries…
+              Choose a pet to review its suggestions, or select a batch to
+              assign together.
             </p>
           </div>
           <span id="review-total" class="pill">0 detections</span>

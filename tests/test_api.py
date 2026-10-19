@@ -518,6 +518,10 @@ def test_demo_assignment_moves_to_tagged_without_writing_to_immich(tmp_path):
         tagged = client.get("/api/detections?status=all&tagging=tagged").json()
         assert tagged["total"] == 1
         assert tagged["items"][0]["photo_tags"][0]["name"] == pet["name"]
+        summary = client.get("/api/status").json()["review_summary"]
+        assert summary["tagged_photos"] == summary["tagged_crops"] == 1
+        assert summary["untagged_photos"] == summary["untagged_crops"] == 5
+        assert summary["pending_tag_changes"] == 0
 
 
 @pytest.mark.parametrize("bulk", [False, True])
@@ -571,3 +575,79 @@ def test_invalid_or_stale_species_correction_leaves_the_crop_unchanged(processed
         assert processed.store.one("SELECT species FROM detections")["species"] == "cat"
         assert processed.store.one("SELECT status FROM reviews")["status"] == "pending"
         assert not processed.publish_one()
+
+
+def test_summary_counts_photos_not_crops_and_excludes_already_tagged_animals(processed):
+    from immich_pet_recognition.models import Detection
+
+    processed.detector.items.append(Detection("dog", 0.9, (1, 1, 20, 20)))
+    processed.store.execute("DELETE FROM passes")
+    processed.store.execute("UPDATE jobs SET status='queued'")
+    processed.process_one()
+    rows = processed.store.rows("SELECT id FROM detections")
+    pet = processed.add_pet("Rusty", "dog")
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+
+        def summary():
+            result = client.get("/api/status").json()["review_summary"]
+            for kind in ("untagged", "tagged"):
+                facet = client.get(
+                    "/api/detections",
+                    params={"tagging": kind, "status": "all", "include_dismissed": False},
+                ).json()
+                assert result[f"{kind}_photos"] == facet["photo_total"]
+                assert result[f"{kind}_crops"] == facet["total"]
+            return result
+
+        counts = summary()
+        assert counts["untagged_photos"] == 1 and counts["untagged_crops"] == 2
+        processed.decide(rows[0]["id"], pet["id"], "confirmed")
+        assert summary()["untagged_photos"] == 1
+        assert summary()["pending_tag_changes"] == 1
+        processed.immich.fail_tag = True
+        processed.publish_one()
+        assert summary()["tagged_photos"] == 0
+        processed.immich.fail_tag = False
+        processed.retry_failed()
+        processed.publish_one()
+        counts = summary()
+        assert counts["untagged_photos"] == counts["untagged_crops"] == 0
+        assert counts["tagged_photos"] == counts["tagged_crops"] == 1
+        assert counts["partially_tagged_photos"] == counts["extra_pending_crops"] == 1
+        processed.decide(rows[0]["id"], None, "rejected")
+        assert summary()["pending_tag_changes"] == 1
+        assert summary()["untagged_photos"] == 0  # Old tag still exists during removal.
+        processed.publish_one()
+        assert summary()["untagged_photos"] == summary()["untagged_crops"] == 1
+        processed.decide(rows[1]["id"], None, "rejected")
+        assert summary()["untagged_photos"] == summary()["untagged_crops"] == 0
+        # Old asset revisions and other model results must never inflate the count.
+        processed.store.execute("UPDATE assets SET revision='changed'")
+        assert summary()["tagged_photos"] == summary()["untagged_photos"] == 0
+
+
+@pytest.mark.parametrize(
+    "candidate,examples,score,margin,enabled,reason",
+    [
+        (False, 0, 0, 0, False, "no_candidate"),
+        (True, 0, 1, 1, True, "needs_examples"),
+        (True, 1, 0.84999, 1, True, "below_similarity"),
+        (True, 1, 0.85, 0.07999, True, "ambiguous"),
+        (True, 1, 0.85, 0.08, False, "automation_paused"),
+        (True, 1, 0.85, 0.08, True, "ready"),
+    ],
+)
+def test_summary_explains_each_pending_crop_once(
+    processed, candidate, examples, score, margin, enabled, reason
+):
+    processed.settings.min_references = 1
+    pet = processed.add_pet("Rusty", "dog")
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    if examples:
+        processed.add_reference(pet["id"], detection, "positive")
+    processed.set_automation(pet["id"], enabled)
+    processed.store.execute(
+        "UPDATE reviews SET pet_id=?,score=?,margin=?",
+        (pet["id"] if candidate else None, score, margin),
+    )
+    assert processed.review_summary()["reasons"] == {reason: 1}

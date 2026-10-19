@@ -312,8 +312,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
 
     @app.post("/api/rematch", dependencies=auth, status_code=202)
     def rematch():
-        service.rematch_requested.set()
-        service.wake_event.set()
+        service.gallery_changed()
         return {"status": "queued"}
 
     @app.post("/api/retry", dependencies=auth, status_code=202)

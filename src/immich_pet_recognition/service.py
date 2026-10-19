@@ -51,6 +51,8 @@ class Service:
         self.worker = None
         # Serializes GPU work and decisions so in-flight matching cannot overwrite human review.
         self.model_lock = threading.RLock()
+        self.recheck_lock = threading.Lock()
+        self.recheck = json.loads(self.store.state("last_recheck", "{}"))
 
     def start(self):
         self.store.execute("UPDATE jobs SET status='queued' WHERE status='processing'")
@@ -243,7 +245,7 @@ class Service:
             "SELECT * FROM reviews WHERE detection_id=? AND model=?", (detection["id"], model)
         )
         if existing and existing["status"] != "pending":
-            return
+            return False
         result = match_pet(
             self.embed(detection),
             detection["species"],
@@ -267,6 +269,7 @@ class Service:
                     "INSERT OR IGNORE INTO automatic_reviews VALUES (?,?)",
                     (detection["id"], model),
                 )
+        return automatic
 
     def automation_enabled(self, pet_id):
         if not pet_id:
@@ -353,22 +356,98 @@ class Service:
     def rematch(self):
         with self.model_lock:
             revision = self.store.state("gallery_revision", "0")
-            gallery = self.references()
-        for detection in self.store.rows(
-            "SELECT d.* FROM detections d JOIN assets a ON a.id=d.asset_id "
-            "JOIN reviews r ON r.detection_id=d.id AND r.model=? "
-            "WHERE d.revision=a.revision AND d.detector=? AND r.status='pending'",
-            (self.settings.recognizer_key, self.settings.detector_key),
-        ):
+            with self.recheck_lock:
+                self.recheck = {
+                    "revision": revision,
+                    "model": self.settings.recognizer_key,
+                    "state": "preparing",
+                    "completed": 0,
+                    "total": None,
+                    "automatic_matches": 0,
+                    "started_at": datetime.now(UTC).isoformat(),
+                    "finished_at": None,
+                    "error": "",
+                }
+        try:
             with self.model_lock:
-                if self.stop_event.is_set():
-                    return
+                detections = self.store.rows(
+                    "SELECT d.* FROM detections d JOIN assets a ON a.id=d.asset_id "
+                    "JOIN reviews r ON r.detection_id=d.id AND r.model=? "
+                    "WHERE d.revision=a.revision AND d.detector=? AND r.status='pending'",
+                    (self.settings.recognizer_key, self.settings.detector_key),
+                )
+                self._recheck_update(revision, total=len(detections))
+                gallery = self.references()
+            self._recheck_update(revision, state="running")
+            automatic_matches = 0
+            for index, detection in enumerate(detections):
+                with self.model_lock:
+                    if self.stop_event.is_set():
+                        self._recheck_update(revision, state="interrupted")
+                        return
+                    if revision != self.store.state("gallery_revision", "0"):
+                        self.rematch_requested.set()
+                        return
+                    automatic_matches += bool(self.evaluate(detection, gallery))
+                    self._recheck_update(
+                        revision, completed=index + 1, automatic_matches=automatic_matches
+                    )
+            with self.model_lock:
                 if revision != self.store.state("gallery_revision", "0"):
                     self.rematch_requested.set()
                     return
-                self.embed(detection)
-                self.evaluate(detection, gallery)
-        self.store.set_state("matched_gallery_revision", revision)
+                with self.recheck_lock:
+                    result = {
+                        **self.recheck,
+                        "state": "complete",
+                        "finished_at": datetime.now(UTC).isoformat(),
+                    }
+                with self.store.connection() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO state VALUES ('matched_gallery_revision',?)",
+                        (revision,),
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO state VALUES ('last_recheck',?)",
+                        (json.dumps(result),),
+                    )
+                with self.recheck_lock:
+                    self.recheck = result
+        except Exception as error:
+            self._recheck_update(revision, state="failed", error=self.safe_error(error))
+            raise
+
+    def _recheck_update(self, revision, **values):
+        with self.recheck_lock:
+            if self.recheck.get("revision") == revision:
+                self.recheck.update(values)
+
+    def recheck_status(self):
+        revision = self.store.state("gallery_revision", "0")
+        with self.recheck_lock:
+            result = dict(self.recheck)
+        current = result.get("revision") == revision and result.get("model") == (
+            self.settings.recognizer_key
+        )
+        pending = self.suggestions_pending()
+        if not current or result.get("state") == "interrupted":
+            result = {
+                "state": "queued" if pending else "idle",
+                "completed": 0,
+                "total": None,
+                "automatic_matches": 0,
+                "finished_at": None,
+                "error": "",
+            }
+        total = result.get("total")
+        result["percent"] = (
+            100
+            if result["state"] == "complete"
+            else min(99, int(result["completed"] * 100 / total))
+            if total
+            else None
+        )
+        return result
 
     def suggestions_pending(self):
         return self.store.state("gallery_revision", "0") != self.store.state(
@@ -376,13 +455,28 @@ class Service:
         )
 
     def gallery_changed(self):
-        with self.store.connection() as conn:
-            conn.execute(
-                "INSERT INTO state VALUES ('gallery_revision','1') ON CONFLICT(key) "
-                "DO UPDATE SET value=CAST(value AS INTEGER)+1"
-            )
-        self.rematch_requested.set()
-        self.wake_event.set()
+        with self.model_lock:
+            with self.store.connection() as conn:
+                conn.execute(
+                    "INSERT INTO state VALUES ('gallery_revision','1') ON CONFLICT(key) "
+                    "DO UPDATE SET value=CAST(value AS INTEGER)+1"
+                )
+                revision = conn.execute(
+                    "SELECT value FROM state WHERE key='gallery_revision'"
+                ).fetchone()[0]
+            with self.recheck_lock:
+                self.recheck = {
+                    "revision": revision,
+                    "model": self.settings.recognizer_key,
+                    "state": "queued",
+                    "completed": 0,
+                    "total": None,
+                    "automatic_matches": 0,
+                    "finished_at": None,
+                    "error": "",
+                }
+            self.rematch_requested.set()
+            self.wake_event.set()
         if self.settings.demo:
             self.rematch_requested.clear()
             self.rematch()
@@ -687,7 +781,65 @@ class Service:
             (self.settings.pipeline_key,),
         )
         self.store.execute("UPDATE reviews SET error=NULL WHERE published=0")
+        if self.recheck_status()["state"] == "failed":
+            self.gallery_changed()
         self.wake_event.set()
+
+    def review_summary(self):
+        """Count photos separately from crops, using the review page's tag semantics."""
+        published = "status='confirmed'" if self.settings.demo else "published=1"
+        current = (
+            "WITH current AS (SELECT d.asset_id,r.* FROM detections d "
+            "JOIN assets a ON a.id=d.asset_id JOIN reviews r ON r.detection_id=d.id "
+            "WHERE d.revision=a.revision AND d.detector=? AND r.model=?),"
+            f"tagged AS (SELECT DISTINCT asset_id FROM current WHERE {published} "
+            "AND pet_id IS NOT NULL UNION SELECT tr.asset_id FROM tag_removals tr "
+            "JOIN pets p ON p.tag=tr.tag) "
+        )
+        params = (self.settings.detector_key, self.settings.recognizer_key)
+        summary = self.store.one(
+            current + "SELECT coalesce(sum(NOT has_tag AND active>0),0) untagged_photos,"
+            "coalesce(sum(CASE WHEN NOT has_tag THEN active ELSE 0 END),0) untagged_crops,"
+            "coalesce(sum(completed>0),0) tagged_photos,"
+            "coalesce(sum(completed),0) tagged_crops,"
+            "coalesce(sum(has_tag AND pending>0),0) partially_tagged_photos,"
+            "coalesce(sum(CASE WHEN has_tag THEN pending ELSE 0 END),0) extra_pending_crops,"
+            "coalesce(sum(changes),0) pending_tag_changes FROM ("
+            "SELECT c.asset_id,sum(c.status<>'rejected') active,"
+            "sum(c.status='pending') pending,"
+            f"sum(c.status='confirmed' AND ({published})) completed,"
+            "EXISTS(SELECT 1 FROM tagged t WHERE t.asset_id=c.asset_id) has_tag,"
+            "sum((c.status='confirmed' AND c.published=0 AND ?=0) OR EXISTS("
+            "SELECT 1 FROM tag_removals tr WHERE tr.detection_id=c.detection_id "
+            "AND tr.model=c.model)) changes FROM current c GROUP BY c.asset_id)",
+            (*params, int(self.settings.demo)),
+        )
+        # Each pending crop has one first unmet check, so these categories never
+        # double-count. Cached results are explicitly provisional during a recheck.
+        summary["reasons"] = {
+            row["reason"]: row["count"]
+            for row in self.store.rows(
+                current + "SELECT CASE WHEN c.pet_id IS NULL THEN 'no_candidate' "
+                "WHEN coalesce(refs.count,0)<? THEN 'needs_examples' "
+                "WHEN c.score<? THEN 'below_similarity' "
+                "WHEN c.margin<? THEN 'ambiguous' "
+                "WHEN coalesce(pa.enabled,?)=0 THEN 'automation_paused' "
+                "ELSE 'ready' END reason,count(*) count FROM current c "
+                "LEFT JOIN (SELECT pet_id,count(*) count FROM reference_images "
+                "WHERE kind='positive' GROUP BY pet_id) refs ON refs.pet_id=c.pet_id "
+                "LEFT JOIN pet_automation pa ON pa.pet_id=c.pet_id "
+                "WHERE c.status='pending' AND NOT EXISTS("
+                "SELECT 1 FROM tagged t WHERE t.asset_id=c.asset_id) GROUP BY reason",
+                (
+                    *params,
+                    self.settings.min_references,
+                    self.settings.match_threshold,
+                    self.settings.match_margin,
+                    int(self.settings.auto_tag),
+                ),
+            )
+        }
+        return summary
 
     def status(self):
         jobs = {
@@ -714,6 +866,8 @@ class Service:
             "match_threshold": self.settings.match_threshold,
             "match_margin": self.settings.match_margin,
             "suggestions_updating": self.suggestions_pending(),
+            "recheck": self.recheck_status(),
+            "review_summary": self.review_summary(),
             "pending_tag_removals": self.store.one("SELECT count(*) total FROM tag_removals")[
                 "total"
             ],

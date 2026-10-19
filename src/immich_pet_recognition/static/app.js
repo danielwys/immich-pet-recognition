@@ -10,7 +10,8 @@ let visibleItems = [],
   selected = new Set(),
   objectUrls = [],
   refreshing = false,
-  busy = false;
+  busy = false,
+  progressPolling = false;
 let reviewRequest = 0,
   pageLimit = 48,
   reviewFingerprint = "";
@@ -124,16 +125,18 @@ function progressCard(pet) {
     node(
       "p",
       "automation-summary",
-      `${pet.auto_tagged_count.toLocaleString()} automatically tagged · ${pet.pending_count.toLocaleString()} to review`,
+      `${pet.auto_tagged_count.toLocaleString()} automatically tagged · ${pet.pending_count.toLocaleString()} unassigned animal crops`,
     ),
   );
   card.append(
     node(
       "p",
       "",
-      status.suggestions_updating
-        ? "Rechecking the queue with your latest examples and settings…"
-        : `${pet.strong_count.toLocaleString()} waiting matches pass all three checks${pet.auto_tag ? "." : " · enable to tag them."}`,
+      recheckActive()
+        ? "Recheck in progress — follow the status above."
+        : status.recheck?.state === "failed"
+          ? "Recheck failed — retry using the status above."
+          : `${pet.strong_count.toLocaleString()} waiting matches pass all three checks${pet.auto_tag ? "." : " · enable to tag them."}`,
     ),
   );
   if (pet.queued_count)
@@ -186,7 +189,7 @@ async function setAutomation(pet) {
         : `${pet.name}: automatic tagging enabled. Rechecking the existing queue.`,
     );
   } finally {
-    busy = false;
+    ((busy = false), (progressPolling = false));
     await refresh();
   }
 }
@@ -220,11 +223,6 @@ function renderLearning() {
     grid.append(intro);
   }
   pets.forEach((pet) => grid.append(progressCard(pet)));
-  $("suggestion-state").textContent = status.suggestions_updating
-    ? "Updating suggestions across your library. Visible matches use your latest examples."
-    : pets.some((p) => p.positive_count > 0)
-      ? "Suggestions use your example galleries. Assignments can teach the next batch."
-      : "No examples yet. Confirmations from the old interface were not used for matching.";
   $("review-automation-summary").textContent =
     automationSummary() + " · Manage";
   $("match-guide-text").textContent =
@@ -232,8 +230,105 @@ function renderLearning() {
   $("match-guide-summary").textContent =
     `Strong suggestion: ${status.min_references} examples · similarity ≥ ${status.match_threshold.toFixed(2)} · lead ≥ ${status.match_margin.toFixed(2)}. How it works`;
 }
+function recheckActive() {
+  return ["queued", "preparing", "running"].includes(status.recheck?.state);
+}
+function renderStatus() {
+  const summary = status.review_summary,
+    check = status.recheck,
+    number = (value) => (value || 0).toLocaleString();
+  $("stat-pending").textContent = number(summary.untagged_photos);
+  $("nav-count").textContent = number(summary.untagged_photos);
+  $("nav-count").title = "Untagged photos";
+  $("stat-confirmed").textContent = number(summary.tagged_photos);
+  $("stat-queued").textContent = number(
+    (status.jobs.queued || 0) + (status.jobs.processing || 0),
+  );
+  $("stat-pets").textContent = pets.length;
+  const active = recheckActive(),
+    title = $("recheck-title"),
+    detail = $("recheck-detail"),
+    bar = $("recheck-progress");
+  const headings = {
+    idle: "Up to date — no recheck waiting",
+    queued: "Recheck queued",
+    preparing: "Preparing recheck…",
+    running: `Rechecking — ${check.percent ?? 0}%`,
+    complete: "Recheck complete · 100%",
+    failed: "Recheck failed",
+  };
+  title.textContent = headings[check.state] || headings.idle;
+  detail.textContent =
+    check.state === "failed"
+      ? `${number(check.completed)} of ${number(check.total)} animal crops checked. ${check.error}`
+      : check.state === "queued"
+        ? "Waiting for the worker to finish its current step. Your latest examples will be used."
+        : check.state === "preparing"
+          ? "Loading the remaining animal crops and your example galleries."
+          : check.state === "running"
+            ? `${number(check.completed)} of ${number(check.total)} animal crops checked · ${number(check.automatic_matches)} matched for automatic tagging so far.`
+            : check.state === "complete"
+              ? `${number(check.completed)} animal crops checked · ${number(check.automatic_matches)} matched for automatic tagging · Finished ${new Date(check.finished_at).toLocaleString()}.`
+              : "Current suggestions have been checked. Add examples to improve future matches.";
+  bar.classList.toggle("hidden", check.state === "idle");
+  if (check.percent === null || check.percent === undefined)
+    bar.removeAttribute("value");
+  else bar.value = check.percent;
+  $("recheck-now").textContent =
+    check.state === "failed" ? "Retry recheck" : "Recheck now";
+  $("recheck-now").disabled = active || busy;
+  $("rematch").disabled = active || busy;
+  document
+    .querySelector(".recheck-card")
+    .classList.toggle("is-failed", check.state === "failed");
+  const remaining = `${number(summary.untagged_photos)} untagged photos remain`;
+  $("recheck-next").textContent = active
+    ? `${remaining}. This percentage measures the recheck, not how many photos are tagged.`
+    : check.state === "failed"
+      ? "The recheck stopped before finishing. Retry to check the remaining suggestions."
+      : summary.untagged_photos
+        ? `${remaining}. Waiting alone won’t improve uncertain matches — assign a batch or add more varied examples.`
+        : "No completely untagged photos left to review.";
+  $("tag-sync-status").classList.toggle("hidden", !summary.pending_tag_changes);
+  $("tag-sync-status").textContent =
+    `${number(summary.pending_tag_changes)} tag changes waiting to sync to Immich. Tag sync is separate from the recheck.`;
+  $("review-breakdown").classList.toggle(
+    "hidden",
+    !summary.untagged_crops && !summary.extra_pending_crops,
+  );
+  $("review-count-explanation").textContent =
+    `${number(summary.untagged_photos)} completely untagged photos contain ${number(summary.untagged_crops)} animal crops. A photo may have several crops.${summary.extra_pending_crops ? ` Another ${number(summary.extra_pending_crops)} unassigned crops are in ${number(summary.partially_tagged_photos)} photos that already have a pet tag; they are excluded from the main count.` : ""}`;
+  const reasons = $("review-reasons");
+  reasons.replaceChildren();
+  const labels = {
+    no_candidate: "no matching example gallery",
+    needs_examples: `suggested pet has fewer than ${status.min_references} examples`,
+    below_similarity: `similarity below ${status.match_threshold.toFixed(2)}`,
+    ambiguous: `lead over look-alikes below ${status.match_margin.toFixed(2)}`,
+    automation_paused: "pass the checks, but automatic tagging is off",
+    ready: "pass the checks; awaiting automatic processing",
+  };
+  Object.entries(labels).forEach(([key, label]) => {
+    if (!summary.reasons[key]) return;
+    const item = node("span", "review-reason");
+    item.append(
+      node("strong", "", number(summary.reasons[key])),
+      `animal crops: ${label}`,
+    );
+    reasons.append(item);
+  });
+  $("review-next-step").textContent = active
+    ? "These reasons use the last stored scores and will update during the recheck. Each crop is counted under its first unmet check."
+    : check.state === "failed"
+      ? "These reasons are incomplete until the recheck finishes. Retry above."
+      : "Select similar photos together and assign the correct pet. Keep “Use my assignments as examples” checked to teach the next recheck. Repeating a recheck with the same examples won’t improve the scores.";
+  $("suggestion-state").textContent =
+    filter === "tagged"
+      ? "Completed pet tags in Immich. Select photos to change or remove a tag."
+      : "Choose a pet to review its suggestions, or select a batch to assign together.";
+}
 async function refresh() {
-  if (refreshing || busy) return;
+  if (refreshing || busy || progressPolling) return;
   refreshing = true;
   try {
     [status, pets] = await Promise.all([api("status"), api("pets")]);
@@ -247,17 +342,7 @@ async function refresh() {
     $("mode-description").textContent = status.demo
       ? "Illustrations and simulated vectors. No real photos."
       : "Your photos, processed on your own hardware.";
-    $("stat-pending").textContent = (
-      status.reviews.pending || 0
-    ).toLocaleString();
-    $("nav-count").textContent = (status.reviews.pending || 0).toLocaleString();
-    $("stat-confirmed").textContent = (
-      status.reviews.confirmed || 0
-    ).toLocaleString();
-    $("stat-queued").textContent = (
-      (status.jobs.queued || 0) + (status.jobs.processing || 0)
-    ).toLocaleString();
-    $("stat-pets").textContent = pets.length;
+    renderStatus();
     $("last-sync").textContent = status.last_sync
       ? "Last sync · " + new Date(status.last_sync).toLocaleString()
       : "Waiting for first sync";
@@ -433,7 +518,7 @@ async function submitBatch(items, endpoint = "review/batch") {
   } catch (error) {
     $("batch-feedback").textContent = error.message;
   } finally {
-    busy = false;
+    ((busy = false), (progressPolling = false));
   }
   if (result) {
     // Keep failed rows visible so partial failures can be corrected without losing the selection.
@@ -938,6 +1023,7 @@ async function sync(full) {
   );
 }
 function updateFilterButtons() {
+  if (status.review_summary) renderStatus();
   $("tag-source").disabled = filter !== "tagged";
   $("include-partial").disabled = filter !== "untagged";
   document.querySelector('#review-sort option[value="suggested"]').hidden =
@@ -1032,14 +1118,22 @@ $("sync").addEventListener("click", () =>
 $("backfill").addEventListener("click", () =>
   sync(true).catch((e) => toast(e.message)),
 );
-$("rematch").addEventListener("click", async () => {
+async function requestRecheck() {
+  if (busy || recheckActive()) return;
+  busy = true;
+  renderStatus();
   try {
     await api("rematch", { method: "POST" });
-    toast("Suggestions queued for refresh.");
+    toast("Recheck queued. Follow its progress above the review tabs.");
   } catch (e) {
     toast(e.message);
+  } finally {
+    busy = false;
+    await refresh();
   }
-});
+}
+$("rematch").addEventListener("click", requestRecheck);
+$("recheck-now").addEventListener("click", requestRecheck);
 $("retry").addEventListener("click", async () => {
   try {
     await api("retry", { method: "POST" });
@@ -1101,3 +1195,25 @@ setInterval(() => {
   if (!$("login-dialog").open && !document.hidden && !busy)
     refresh().catch(() => {});
 }, 10000);
+
+// Only status changes during this lightweight poll; selections and photo cards stay put.
+setInterval(async () => {
+  if (
+    !recheckActive() ||
+    progressPolling ||
+    refreshing ||
+    busy ||
+    document.hidden ||
+    $("login-dialog").open
+  )
+    return;
+  progressPolling = true;
+  try {
+    status = await api("status");
+    renderStatus();
+  } catch {
+    // The regular refresh handles connection errors and authentication.
+  } finally {
+    progressPolling = false;
+  }
+}, 2000);
