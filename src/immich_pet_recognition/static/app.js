@@ -496,20 +496,26 @@ async function notThisPet(item) {
     "references/batch",
   );
 }
+function matchScore(value, minimum) {
+  const rounded = value.toFixed(3);
+  return value < minimum && Number(rounded) >= minimum
+    ? `<${minimum.toFixed(3)}`
+    : rounded;
+}
 function renderGates(recommendation) {
   const details = node("details", "match-reasons");
   details.append(
     node(
       "summary",
       "",
-      `Why this suggestion? · similarity ${recommendation.score.toFixed(2)}`,
+      `Why this suggestion? · similarity ${matchScore(recommendation.score, status.match_threshold)}`,
     ),
   );
   recommendation.gates.forEach((gate) => {
     const value =
       gate.label === "Examples"
         ? `${gate.value} / ${gate.required}`
-        : `${gate.value.toFixed(2)} / ${gate.required.toFixed(2)} minimum`;
+        : `${matchScore(gate.value, gate.required)} / ${gate.required.toFixed(3)} minimum`;
     details.append(
       node(
         "p",
@@ -552,7 +558,8 @@ async function renderReview() {
   selected = new Set([...selected].filter((id) => visibleIds.has(id)));
   const grid = $("review-grid");
   grid.replaceChildren();
-  $("review-total").textContent = `${data.photo_total.toLocaleString()} photos`;
+  $("review-total").textContent =
+    `${data.photo_total.toLocaleString()} photos · ${data.total.toLocaleString()} animal crops`;
   $("review-view-description").textContent = status.demo
     ? filter === "untagged"
       ? "Demo photos without a simulated pet tag."
@@ -561,8 +568,8 @@ async function renderReview() {
       ? "Photos without a pet tag. A suggestion is not a tag; queued tag changes stay here until they sync."
       : "Photos with a pet tag already written to Immich, whether assigned manually or automatically. Select photos to correct or remove tags.";
   $("page-range").textContent = data.total
-    ? `${offset + 1}–${Math.min(offset + data.limit, data.total)} of ${data.total.toLocaleString()}`
-    : "No detections here";
+    ? `${offset + 1}–${Math.min(offset + data.limit, data.total)} of ${data.total.toLocaleString()} animal crops`
+    : "No photos here";
   $("previous").disabled = offset === 0;
   $("next").disabled = offset + data.limit >= data.total;
   if (!visibleItems.length) {
