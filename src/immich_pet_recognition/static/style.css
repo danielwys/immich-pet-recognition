@@ -1050,6 +1050,79 @@ progress::-webkit-progress-value {
   background: #e5f4eb;
   color: #18794e;
 }
+.tag-badge {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  right: 10px;
+  width: fit-content;
+  max-width: calc(100% - 20px);
+  border-radius: 5px;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 650;
+  background: white;
+  color: #475569;
+  box-shadow: 0 1px 5px #0002;
+  pointer-events: none;
+}
+.tag-badge.is-tagged {
+  background: #e5f4eb;
+  color: #166534;
+}
+.tag-badge.is-syncing {
+  background: #edf3ff;
+  color: #1d4ed8;
+}
+.review-automation {
+  margin-bottom: 10px;
+}
+.review-automation > summary {
+  cursor: pointer;
+  padding: 10px 0;
+  color: #475569;
+  font-size: 12px;
+}
+.review-view-description {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 14px;
+}
+.more-filters {
+  position: relative;
+  font-size: 12px;
+  color: #475569;
+}
+.more-filters > summary {
+  cursor: pointer;
+  padding: 10px 0;
+}
+.more-filters label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+}
+.tagging-tabs {
+  gap: 8px;
+  margin: 16px 0 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.tagging-tabs button {
+  font-size: 15px;
+  font-weight: 650;
+  padding: 12px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.tagging-tabs button.selected {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
 .filename {
   margin: 8px 0;
 }

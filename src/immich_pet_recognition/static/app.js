@@ -3,7 +3,7 @@ let token = sessionStorage.getItem("pet-service-token") || "";
 let pets = [],
   status = {},
   panel = "review",
-  filter = "pending",
+  filter = "untagged",
   petFilter = "",
   offset = 0;
 let visibleItems = [],
@@ -16,8 +16,8 @@ let reviewRequest = 0,
   reviewFingerprint = "";
 const titles = {
   review: [
-    "Review your pets.",
-    "Select photos, assign them together, and improve the next suggestions.",
+    "Tag your pets.",
+    "Start with untagged photos. Tagged keeps manual and automatic results together.",
   ],
   pets: [
     "Teach. Automate. Check.",
@@ -192,7 +192,10 @@ async function setAutomation(pet) {
 }
 function showPetReview(pet, nextFilter) {
   petFilter = pet?.id || "";
-  filter = nextFilter;
+  filter = nextFilter === "pending" ? "untagged" : "tagged";
+  $("tag-source").value = nextFilter === "automatic" ? "automatic" : "all";
+  document.querySelector(".more-filters").open = nextFilter === "automatic";
+  $("include-dismissed").checked = false;
   offset = 0;
   selected.clear();
   updateFilterButtons();
@@ -221,8 +224,10 @@ function renderLearning() {
     : pets.some((p) => p.positive_count > 0)
       ? "Suggestions use your example galleries. Assignments can teach the next batch."
       : "No examples yet. Confirmations from the old interface were not used for matching.";
+  $("review-automation-summary").textContent =
+    automationSummary() + " · Manage";
   $("match-guide-text").textContent =
-    `A match must pass all three checks: ${status.min_references} examples for that pet, similarity ≥ ${status.match_threshold.toFixed(2)}, and a lead ≥ ${status.match_margin.toFixed(2)} over look-alikes. Enable automatic tagging separately for each pet above. Matches below either score stay in To review. Human assignments teach the gallery; automatic tags never do.`;
+    `A match must pass all three checks: ${status.min_references} examples for that pet, similarity ≥ ${status.match_threshold.toFixed(2)}, and a lead ≥ ${status.match_margin.toFixed(2)} over look-alikes. Enable automatic tagging in Pets & automation. Human assignments teach the gallery; automatic tags never do.`;
   $("match-guide-summary").textContent =
     `Strong suggestion: ${status.min_references} examples · similarity ≥ ${status.match_threshold.toFixed(2)} · lead ≥ ${status.match_margin.toFixed(2)}. How it works`;
 }
@@ -302,7 +307,9 @@ function renderPetFilters() {
       );
       b.setAttribute("aria-pressed", String(petFilter === id));
       b.title = id
-        ? `Suggested or assigned to ${name}`
+        ? filter === "tagged"
+          ? `Photos already tagged as ${name}`
+          : `Suggested or assigned to ${name}`
         : "Every detected animal";
       container.append(b);
     },
@@ -324,7 +331,16 @@ function updateSelection() {
       ? "Change selected to:"
       : "Assign selected:";
   $("clear-selection").disabled = busy || !chosen.length;
-  $("clear-selection").classList.toggle("hidden", allShownSelected);
+  $("clear-selection").classList.toggle(
+    "hidden",
+    allShownSelected || !chosen.length,
+  );
+  document
+    .querySelector(".batch-actions")
+    .classList.toggle("hidden", !chosen.length);
+  document
+    .querySelector(".learn-option")
+    .classList.toggle("hidden", !chosen.length);
   $("select-page").textContent = allShownSelected
     ? "Unselect all"
     : "Select shown";
@@ -335,6 +351,14 @@ function updateSelection() {
     !visibleItems.some(
       (item) => item.recommendation?.confident && !item.published,
     );
+  $("select-strong").classList.toggle(
+    "hidden",
+    !visibleItems.some((item) => item.recommendation?.confident),
+  );
+  $("accept-suggestions").classList.toggle(
+    "hidden",
+    !visibleItems.some((item) => item.recommendation),
+  );
   $("accept-suggestions").disabled =
     busy ||
     !chosen.length ||
@@ -343,6 +367,10 @@ function updateSelection() {
     busy ||
     !chosen.length ||
     chosen.some((item) => item.status !== "confirmed" || !item.pet_id);
+  $("teach-confirmed").classList.toggle(
+    "hidden",
+    !visibleItems.some((item) => item.status === "confirmed"),
+  );
   $("remove-tags").disabled =
     busy ||
     !chosen.length ||
@@ -353,6 +381,10 @@ function updateSelection() {
   );
   $("dismiss-selected").disabled =
     busy || !chosen.length || chosen.some((item) => item.published);
+  $("dismiss-selected").classList.toggle(
+    "hidden",
+    !visibleItems.some((item) => item.status === "pending"),
+  );
   const assignments = $("batch-pets");
   assignments.replaceChildren();
   pets.forEach((pet) =>
@@ -492,12 +524,14 @@ function renderGates(recommendation) {
 async function renderReview() {
   const request = ++reviewRequest;
   const query = new URLSearchParams({
-    status: filter === "automatic" ? "confirmed" : filter,
+    status: "all",
+    tagging: filter,
+    include_dismissed: $("include-dismissed").checked,
     offset,
     limit: pageLimit,
     sort: $("review-sort").value,
   });
-  if (filter === "automatic") query.set("source", "automatic");
+  if (filter === "tagged") query.set("source", $("tag-source").value);
   if (petFilter) query.set("pet_id", petFilter);
   const data = await api("detections?" + query);
   if (panel !== "review" || request !== reviewRequest) return;
@@ -518,7 +552,14 @@ async function renderReview() {
   selected = new Set([...selected].filter((id) => visibleIds.has(id)));
   const grid = $("review-grid");
   grid.replaceChildren();
-  $("review-total").textContent = `${data.total.toLocaleString()} detections`;
+  $("review-total").textContent = `${data.photo_total.toLocaleString()} photos`;
+  $("review-view-description").textContent = status.demo
+    ? filter === "untagged"
+      ? "Demo photos without a simulated pet tag."
+      : "Simulated manual and automatic tags. No changes are sent to Immich."
+    : filter === "untagged"
+      ? "Photos without a pet tag. A suggestion is not a tag; queued tag changes stay here until they sync."
+      : "Photos with a pet tag already written to Immich, whether assigned manually or automatically. Select photos to correct or remove tags.";
   $("page-range").textContent = data.total
     ? `${offset + 1}–${Math.min(offset + data.limit, data.total)} of ${data.total.toLocaleString()}`
     : "No detections here";
@@ -530,27 +571,26 @@ async function renderReview() {
       node(
         "h2",
         "",
-        filter === "automatic"
-          ? "No automatic tags yet."
-          : petFilter
-            ? "No matches for this pet yet."
-            : "No photos waiting here.",
+        filter === "tagged"
+          ? "No tagged photos match these filters."
+          : "No untagged photos match these filters.",
       ),
       node(
         "p",
         "",
-        filter === "automatic"
-          ? "When automatic tagging is on, matches appear here after passing all three checks. Weaker matches stay in To review."
-          : petFilter
-            ? "Switch to All pets to choose examples. Suggestions appear after examples are added and matching catches up."
-            : "New detections appear after the library scan. You can also turn existing confirmed photos into examples.",
+        petFilter || $("tag-source").value !== "all"
+          ? "Clear the filters to see the rest of your photos."
+          : filter === "tagged"
+            ? "Photos move here after their pet tags reach Immich."
+            : "New photos will appear here after the next library scan. Use Tagged to check completed tags.",
       ),
       button(
-        pets.length ? "Show all pets" : "Register your pet",
+        pets.length ? "Clear filters" : "Register your pet",
         "primary",
         () => {
           if (!pets.length) return switchPanel("pets");
           petFilter = "";
+          $("tag-source").value = "all";
           renderPetFilters();
           return renderReview();
         },
@@ -575,6 +615,21 @@ async function renderReview() {
     img.alt = `Detected ${item.species} in ${item.name}`;
     img.loading = "lazy";
     wrap.append(img, node("span", "species", item.species), checkbox);
+    const tagged = item.photo_tags.length > 0;
+    const syncing =
+      item.status === "confirmed" && !item.published && !status.demo;
+    const removing = item.status === "rejected" && tagged;
+    const tagBadge = node(
+      "span",
+      "tag-badge " +
+        (tagged ? "is-tagged" : syncing ? "is-syncing" : "is-untagged"),
+      tagged
+        ? `${status.demo ? "Demo tag" : "✓ Tagged"} · ${item.photo_tags.map((tag) => tag.name).join(", ")}`
+        : syncing
+          ? `Tagging ${item.pet_name}…`
+          : "Untagged",
+    );
+    wrap.append(tagBadge);
     card.append(wrap);
     const content = node("div", "card-content"),
       line = node("div", "card-line");
@@ -612,10 +667,28 @@ async function renderReview() {
         node(
           "span",
           "quality",
-          item.status === "confirmed" ? "Confirmed" : "Dismissed",
+          item.status === "confirmed"
+            ? item.published || status.demo
+              ? item.automatic
+                ? "Automatic"
+                : "Manual"
+              : "Syncing"
+            : "Skipped",
         ),
       );
     content.append(line, node("p", "filename", item.name));
+    if (tagged && item.status === "pending")
+      content.append(
+        node(
+          "p",
+          "review-explanation",
+          "This photo already has a pet tag. This animal crop has not been assigned yet.",
+        ),
+      );
+    if (removing)
+      content.append(
+        node("p", "review-explanation", "Removing this pet tag from Immich…"),
+      );
     if (rec) {
       const mode = pets.find((pet) => pet.id === rec.pet_id);
       const missed = rec.gates
@@ -652,14 +725,17 @@ async function renderReview() {
       content.append(actions);
       const options = node("div", "pet-options");
       const compatible = pets.filter(
-        (pet) => pet.species === item.species && pet.id !== rec?.pet_id,
+        (pet) =>
+          pet.species === item.species &&
+          pet.id !== rec?.pet_id &&
+          (item.status !== "confirmed" || pet.id !== item.pet_id),
       );
       if (compatible.length)
         options.append(
           node(
             "span",
             "",
-            item.status === "confirmed" ? "Change to:" : "Assign:",
+            item.status === "confirmed" ? "Change tag:" : "Tag as:",
           ),
         );
       compatible.forEach((pet) =>
@@ -669,7 +745,7 @@ async function renderReview() {
       );
       options.append(
         button(
-          item.status === "confirmed" ? "Remove tag" : "Dismiss",
+          item.status === "confirmed" ? "Remove tag" : "Skip",
           "quiet",
           () => dismiss([item]),
         ),
@@ -687,7 +763,9 @@ async function renderReview() {
               : "✓ Tagged in Immich · human confirmed"
             : status.demo
               ? "Confirmed in demo"
-              : "Tag writeback queued",
+              : item.error
+                ? "Tag sync failed · retry in Processing"
+                : "Tagging in Immich…",
         ),
       );
       content.append(
@@ -725,14 +803,15 @@ function renderPets() {
       button("Review automatic tags →", "secondary", () =>
         showPetReview(pet, "automatic"),
       ),
-      button("Review uncertain matches →", "quiet", () =>
+      button("Review untagged photos →", "quiet", () =>
         showPetReview(pet, "pending"),
       ),
     );
     card.append(
       button("Choose example photos →", "quiet", () => {
         petFilter = "";
-        filter = "pending";
+        filter = "untagged";
+        $("tag-source").value = "all";
         offset = 0;
         selected.clear();
         updateFilterButtons();
@@ -743,7 +822,8 @@ function renderPets() {
     card.append(
       button("Use existing confirmations →", "quiet", () => {
         petFilter = pet.id;
-        filter = "confirmed";
+        filter = "tagged";
+        $("tag-source").value = "all";
         offset = 0;
         selected.clear();
         updateFilterButtons();
@@ -823,6 +903,7 @@ async function sync(full) {
   );
 }
 function updateFilterButtons() {
+  $("tag-source").disabled = filter !== "tagged";
   document.querySelectorAll("[data-filter]").forEach((b) => {
     b.classList.toggle("selected", b.dataset.filter === filter);
     b.setAttribute("aria-pressed", String(b.dataset.filter === filter));
@@ -836,12 +917,24 @@ document
 document.querySelectorAll("[data-filter]").forEach((b) =>
   b.addEventListener("click", () => {
     filter = b.dataset.filter;
+    $("tag-source").value = "all";
     offset = 0;
     selected.clear();
     updateFilterButtons();
+    renderPetFilters();
     renderReview().catch((e) => toast(e.message));
   }),
 );
+$("tag-source").addEventListener("change", () => {
+  offset = 0;
+  selected.clear();
+  renderReview().catch((e) => toast(e.message));
+});
+$("include-dismissed").addEventListener("change", () => {
+  offset = 0;
+  selected.clear();
+  renderReview().catch((e) => toast(e.message));
+});
 $("review-sort").addEventListener("change", () => {
   offset = 0;
   selected.clear();

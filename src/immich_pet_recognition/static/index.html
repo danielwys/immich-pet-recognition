@@ -50,10 +50,10 @@
       <section class="page-intro">
         <div>
           <span class="eyebrow">PET RECOGNITION</span>
-          <h1 id="page-title">Review your pets.</h1>
+          <h1 id="page-title">Tag your pets.</h1>
           <p id="page-description">
-            Select photos, assign them together, and improve the next
-            suggestions.
+            Start with untagged photos. Tagged keeps manual and automatic
+            results together.
           </p>
         </div>
         <button id="sync" class="primary">
@@ -62,12 +62,13 @@
       </section>
       <section class="stats" aria-label="Library status">
         <div>
-          <span>Waiting for review</span><strong id="stat-pending">—</strong
+          <span>Animals awaiting identity</span
+          ><strong id="stat-pending">—</strong
           ><small>Below the checks, or automation off</small>
         </div>
         <div>
-          <span>Confirmed matches</span><strong id="stat-confirmed">—</strong
-          ><small>Human confirmed + automatic matches</small>
+          <span>Assigned animals</span><strong id="stat-confirmed">—</strong
+          ><small>Manual + automatic assignments</small>
         </div>
         <div>
           <span>Photos in queue</span><strong id="stat-queued">—</strong
@@ -88,30 +89,14 @@
           </div>
           <span id="review-total" class="pill">0 detections</span>
         </div>
-        <div id="learning-progress" class="learning-progress"></div>
-        <details class="match-guide">
-          <summary id="match-guide-summary">
-            What makes a strong suggestion?
-          </summary>
-          <p id="match-guide-text"></p>
-          <p>
-            Similarity is not a probability. These defaults need checking on
-            photos you have kept out of the example gallery. More examples do
-            not guarantee accuracy.
-          </p>
-        </details>
+        <div class="filters tagging-tabs" aria-label="Review filter">
+          <button data-filter="untagged" class="selected" aria-pressed="true">
+            Untagged photos</button
+          ><button data-filter="tagged" aria-pressed="false">
+            Tagged photos
+          </button>
+        </div>
         <div class="toolbar">
-          <div class="filters" aria-label="Review filter">
-            <button data-filter="pending" class="selected" aria-pressed="true">
-              To review</button
-            ><button data-filter="confirmed" aria-pressed="false">
-              Confirmed</button
-            ><button data-filter="automatic" aria-pressed="false">
-              Automatically tagged</button
-            ><button data-filter="rejected" aria-pressed="false">
-              Dismissed</button
-            ><button data-filter="all" aria-pressed="false">All</button>
-          </div>
           <div
             id="pet-filters"
             class="pet-filters"
@@ -124,7 +109,32 @@
               <option value="newest">Newest first</option>
             </select></label
           >
+          <details class="more-filters">
+            <summary>More filters</summary>
+            <label
+              >Tag source<select
+                id="tag-source"
+                aria-label="Tag source"
+                disabled
+              >
+                <option value="all">Manual + automatic</option>
+                <option value="manual">Manual only</option>
+                <option value="automatic">Automatic only</option>
+              </select></label
+            >
+            <label
+              ><input id="include-dismissed" type="checkbox" /> Show skipped
+              photos</label
+            >
+          </details>
         </div>
+        <p
+          id="review-view-description"
+          class="review-view-description"
+          role="status"
+        >
+          Photos without a pet tag. Suggestions are waiting for your choice.
+        </p>
         <div class="batch-bar" aria-label="Bulk review">
           <div class="batch-top">
             <button id="select-page" class="secondary">Select shown</button>
@@ -147,7 +157,7 @@
               Remove tags
             </button>
             <button id="dismiss-selected" class="quiet" disabled>
-              Dismiss selected
+              Skip selected
             </button>
           </div>
           <label class="learn-option"
@@ -166,12 +176,29 @@
           ><span id="page-range"></span
           ><button id="next" class="secondary">Next →</button>
         </div>
+        <details class="review-automation">
+          <summary id="review-automation-summary">
+            Automatic tagging settings
+          </summary>
+          <div id="learning-progress" class="learning-progress"></div>
+        </details>
+        <details class="match-guide">
+          <summary id="match-guide-summary">
+            What makes a strong suggestion?
+          </summary>
+          <p id="match-guide-text"></p>
+          <p>
+            Similarity is not a probability. These defaults need checking on
+            photos you have kept out of the example gallery. More examples do
+            not guarantee accuracy.
+          </p>
+        </details>
         <div class="tip">
           <span aria-hidden="true">✦</span>
           <p>
-            <strong>Already confirmed photos in the old interface?</strong> Open
-            Confirmed, select them, then choose “Use confirmed as examples”.
-            Their existing tags stay in place.
+            <strong>Fix a tag:</strong> Open Tagged, select photos, then choose
+            the correct pet or Remove tags. Manual and automatic tags are
+            together.
           </p>
           <button class="quiet" data-panel="pets">Manage pets →</button>
         </div>
@@ -196,8 +223,8 @@
           </p>
           <p id="automation-thresholds"></p>
           <p>
-            <strong>Made a mistake?</strong> Open Confirmed or Automatically
-            tagged, select photos, then choose the correct pet or Remove tags.
+            <strong>Made a mistake?</strong> Open Tagged, select photos, then
+            choose the correct pet or Remove tags.
           </p>
         </div>
         <form id="pet-form" class="form-row">

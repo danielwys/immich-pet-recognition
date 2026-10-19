@@ -1,4 +1,5 @@
 import hashlib
+import json
 import secrets
 import sqlite3
 from contextlib import asynccontextmanager
@@ -174,7 +175,9 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         limit: int = Query(default=48, ge=1, le=100),
         sort: Literal["suggested", "newest"] = "suggested",
         pet_id: UUID | None = None,
-        source: Literal["all", "automatic"] = "all",
+        source: Literal["all", "manual", "automatic"] = "all",
+        tagging: Literal["all", "untagged", "tagged"] = "all",
+        include_dismissed: bool = True,
     ):
         clause = (
             "FROM detections d JOIN assets a ON a.id=d.asset_id "
@@ -182,23 +185,52 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
             "WHERE d.revision=a.revision AND d.detector=? AND r.model=?"
         )
         params = [settings.detector_key, settings.recognizer_key]
+        published = "pr.status='confirmed'" if settings.demo else "pr.published=1"
+        # A photo can contain several detected animals. One published pet tag makes
+        # the whole photo tagged, even when another crop still has no assignment.
+        photo_tags = (
+            "SELECT pp.id pet_id,pp.name,pp.tag FROM reviews pr "
+            "JOIN detections pd ON pd.id=pr.detection_id JOIN pets pp ON pp.id=pr.pet_id "
+            "WHERE pd.asset_id=d.asset_id AND pd.revision=a.revision "
+            f"AND pd.detector=d.detector AND pr.model=r.model AND {published} "
+            "UNION SELECT pp.id,pp.name,pp.tag FROM tag_removals tr "
+            "JOIN pets pp ON pp.tag=tr.tag WHERE tr.asset_id=d.asset_id"
+        )
+        if tagging != "all":
+            clause += f" AND {'NOT ' if tagging == 'untagged' else ''}EXISTS({photo_tags})"
+        if not include_dismissed:
+            clause += (
+                " AND (r.status<>'rejected' OR EXISTS(SELECT 1 FROM tag_removals tr "
+                "WHERE tr.detection_id=d.id AND tr.model=r.model))"
+            )
         if status != "all":
             clause += " AND r.status=?"
             params.append(status)
         if pet_id:
-            clause += " AND r.pet_id=?"
-            params.append(str(pet_id))
-        if source == "automatic":
             clause += (
-                " AND EXISTS(SELECT 1 FROM automatic_reviews ar "
+                f" AND EXISTS(SELECT 1 FROM ({photo_tags}) pt WHERE pt.pet_id=?)"
+                if tagging == "tagged"
+                else " AND r.pet_id=?"
+            )
+            params.append(str(pet_id))
+        if source != "all":
+            clause += (
+                f" AND {'NOT ' if source == 'manual' else ''}EXISTS("
+                "SELECT 1 FROM automatic_reviews ar "
                 "WHERE ar.detection_id=r.detection_id AND ar.model=r.model)"
             )
-        count = service.store.one("SELECT count(*) total " + clause, params)["total"]
+            clause += " AND r.status='confirmed'"
+        counts = service.store.one(
+            "SELECT count(*) total,count(DISTINCT a.id) photo_total " + clause, params
+        )
         rows = service.store.rows(
             "SELECT d.id,d.asset_id,d.species,d.score detector_score,d.box,a.name,"
             "r.pet_id,r.score,r.margin,r.status,r.published,r.error,p.name pet_name,"
             "EXISTS(SELECT 1 FROM automatic_reviews ar WHERE ar.detection_id=r.detection_id "
-            "AND ar.model=r.model) automatic "
+            "AND ar.model=r.model) automatic,"
+            "(SELECT json_group_array("
+            "json_object('pet_id',pt.pet_id,'name',pt.name,'tag',pt.tag)) "
+            f"FROM ({photo_tags}) pt) photo_tags "
             + clause
             + (
                 " ORDER BY r.score DESC,d.rowid DESC"
@@ -208,9 +240,11 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
             + " LIMIT ? OFFSET ?",
             [*params, limit, offset],
         )
+        for row in rows:
+            row["photo_tags"] = json.loads(row["photo_tags"])
         return {
             "items": service.recommendations(rows),
-            "total": count,
+            **counts,
             "offset": offset,
             "limit": limit,
         }

@@ -104,11 +104,11 @@ it is not a calibrated probability or a guarantee of correct identity. **Select 
 and **Accept suggested identities** approve the selected photos together, using each photo's
 own suggested pet. Selection is limited to the displayed page (up to 48 crops).
 
-To teach from photos confirmed in the original interface, open **Confirmed**, select photos,
+To teach from photos confirmed in the original interface, open **Tagged**, select photos,
 and choose **Use confirmed as examples**. This also works for already-tagged photos and does not
 rewrite their tags. Batch results report individual failures instead of silently losing them.
 
-To correct an assignment, open **Confirmed**, filter to the wrong pet, select the affected crops,
+To correct an assignment, open **Tagged**, filter to the wrong pet, select the affected crops,
 and click the correct pet's name. Published tags can be reassigned. The correct tag is added,
 then the old tag is removed when no other confirmed animal in that photo still needs it.
 With the examples option enabled, the crop becomes a positive example for the correct pet and
@@ -116,8 +116,19 @@ a negative example for the old pet. Conflicting positive examples are removed.
 
 To untag without assigning another pet, select confirmed crops and choose **Remove tags**, or
 use **Remove tag** on a card. This removes the assignment and its positive example and moves
-the crop to **Dismissed**; the photo itself is retained. Failed tag changes remain visible and
+the crop out of the active queue (use **More filters → Show skipped photos** to find it); the photo itself is retained. Failed tag changes remain visible and
 can be retried in **Processing**. Pending removals survive restarts and are verified against Immich.
+
+## Finding photos that still need tags
+
+Review opens on **Untagged**: photos without any pet tag published by the companion. **Tagged**
+combines manual and automatic tags in one view. A clear badge on each crop shows the existing
+pet tags; a suggested identity is separate. A photo containing several animals is tagged once
+any of its crops has a published pet tag, and the other crops show that photo's existing tags too.
+Queued or failed writes remain untagged until they reach Immich. During reassignment or removal,
+the existing tag stays visible until the change completes. **More filters** contains the optional
+manual/automatic distinction and **Show skipped photos**. The filter reports unique photo counts;
+the paginated cards are detected animal crops.
 
 ## Automatic tagging
 
@@ -129,7 +140,7 @@ Use **Pets & automation → Enable automatic tagging** separately for each pet. 
 appear above the review queue. Changes persist in SQLite without restarting the service.
 Enabling rechecks pending matches in the existing library as well as new photos. **Pause** stops
 future automatic tags and cancels unpublished automatic matches; existing tags and human
-confirmations stay. **Automatically tagged** lets you audit and correct automatic assignments.
+confirmations stay. **Tagged** combines manual and automatic results; **More filters → Tag source** narrows the view when auditing.
 The per-pet cards show example counts, automatic tags, and matches still waiting for review.
 
 A match must clear both thresholds and have at least `PET_MIN_REFERENCES` positive references.

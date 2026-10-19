@@ -393,3 +393,114 @@ def test_automation_controls_and_audit_filter(processed):
             ).status_code
             == 403
         )
+
+
+def test_tagged_view_combines_manual_and_automatic_and_waits_for_publication(processed):
+    first = processed.store.one("SELECT id FROM detections")["id"]
+    add_another_photo(processed)
+    pet = processed.add_pet("Rusty", "dog")
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+
+        def view(tagging, **extra):
+            return client.get(
+                "/api/detections", params={"status": "all", "tagging": tagging, **extra}
+            ).json()
+
+        assert view("untagged")["total"] == 2
+        assert view("tagged")["total"] == 0
+        processed.decide(first, pet["id"], "confirmed")
+        assert view("untagged")["total"] == 2  # Queued and failed writes are still untagged.
+        processed.immich.fail_tag = True
+        processed.publish_one()
+        assert view("tagged")["total"] == 0
+        processed.immich.fail_tag = False
+        processed.retry_failed()
+        processed.publish_one()
+        processed.settings.min_references = 1
+        processed.add_reference(pet["id"], first, "positive")
+        processed.set_automation(pet["id"], True)
+        processed.rematch()
+        assert view("untagged")["total"] == 1
+        processed.publish_one()
+        tagged = view("tagged")
+        assert tagged["total"] == tagged["photo_total"] == 2
+        assert {item["automatic"] for item in tagged["items"]} == {0, 1}
+        assert all(
+            item["photo_tags"] == [{"pet_id": pet["id"], "name": "Rusty", "tag": "Pets/Rusty"}]
+            for item in tagged["items"]
+        )
+        assert view("tagged", source="automatic")["total"] == 1
+        assert view("tagged", source="manual")["total"] == 1
+        assert view("untagged")["total"] == 0
+
+
+def test_completely_untagged_is_a_photo_property_not_an_animal_crop_property(processed):
+    from immich_pet_recognition.models import Detection
+
+    first = processed.store.one("SELECT id FROM detections")["id"]
+    pet = processed.add_pet("Rusty", "dog")
+    processed.decide(first, pet["id"], "confirmed")
+    processed.publish_one()
+    # Discover another animal in the same photo without assigning that animal.
+    processed.detector.items.append(Detection("dog", 0.9, (1, 1, 20, 20)))
+    processed.store.execute("DELETE FROM passes")
+    processed.store.execute("UPDATE jobs SET status='queued'")
+    processed.process_one()
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        assert client.get("/api/detections?status=all&tagging=untagged").json()["total"] == 0
+        tagged = client.get(f"/api/detections?status=all&tagging=tagged&pet_id={pet['id']}").json()
+        assert tagged["total"] == 2
+        assert tagged["photo_total"] == 1
+        assert {item["status"] for item in tagged["items"]} == {"confirmed", "pending"}
+        assert all(item["photo_tags"][0]["name"] == "Rusty" for item in tagged["items"])
+
+
+def test_queued_corrections_and_removals_keep_existing_photo_tags_visible(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    rusty = processed.add_pet("Rusty", "dog")
+    butter = processed.add_pet("Butter", "dog")
+    processed.decide(detection, rusty["id"], "confirmed")
+    processed.publish_one()
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+
+        def tagged():
+            return client.get("/api/detections?status=all&tagging=tagged").json()
+
+        processed.decide(detection, butter["id"], "confirmed")
+        assert tagged()["items"][0]["photo_tags"][0]["name"] == "Rusty"
+        processed.publish_one()
+        assert tagged()["items"][0]["photo_tags"][0]["name"] == "Butter"
+        processed.decide(detection, None, "rejected")
+        assert tagged()["total"] == 1  # Remote removal has not happened yet.
+        assert (
+            client.get("/api/detections?status=all&tagging=tagged&include_dismissed=false").json()[
+                "total"
+            ]
+            == 1
+        )
+        processed.publish_one()
+        assert tagged()["total"] == 0
+        assert client.get("/api/detections?status=all&tagging=untagged").json()["total"] == 1
+        assert (
+            client.get(
+                "/api/detections?status=all&tagging=untagged&include_dismissed=false"
+            ).json()["total"]
+            == 0
+        )
+
+
+def test_demo_assignment_moves_to_tagged_without_writing_to_immich(tmp_path):
+    settings = Settings(_env_file=None, demo=True, data_dir=tmp_path)
+    with TestClient(create_app(settings)) as client:
+        pet = client.get("/api/pets").json()[0]
+        crop = client.get("/api/detections").json()["items"][0]
+        client.post(
+            f"/api/detections/{crop['id']}/decision",
+            json={
+                "status": "confirmed",
+                "pet_id": pet["id"],
+            },
+        )
+        tagged = client.get("/api/detections?status=all&tagging=tagged").json()
+        assert tagged["total"] == 1
+        assert tagged["items"][0]["photo_tags"][0]["name"] == pet["name"]
