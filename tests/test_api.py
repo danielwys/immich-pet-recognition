@@ -651,3 +651,58 @@ def test_summary_explains_each_pending_crop_once(
         (pet["id"] if candidate else None, score, margin),
     )
     assert processed.review_summary()["reasons"] == {reason: 1}
+
+
+def test_summary_scales_to_a_library_without_rebuilding_the_tag_set_per_crop(service, monkeypatch):
+    from contextlib import contextmanager
+
+    pet = service.add_pet("Rusty", "dog")
+    model, detector = service.settings.recognizer_key, service.settings.detector_key
+    with service.store.connection() as conn:
+        conn.executemany(
+            "INSERT INTO assets VALUES (?,?,?)",
+            [(f"asset-{i}", "v1", "test.jpg") for i in range(5000)],
+        )
+        conn.executemany(
+            "INSERT INTO detections VALUES (?,?,?,?,?,?,?,?)",
+            [
+                (f"crop-{i}", f"asset-{i // 2}", "v1", detector, "dog", 0.9, "[]", "")
+                for i in range(10000)
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO reviews(detection_id,model,pet_id,score,margin,status,published) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [
+                (
+                    f"crop-{i}",
+                    model,
+                    pet["id"] if i % 20 == 0 else None,
+                    0,
+                    0,
+                    "confirmed" if i % 20 == 0 else "pending",
+                    int(i % 20 == 0),
+                )
+                for i in range(10000)
+            ],
+        )
+    connection = service.store.connection
+    steps = 0
+
+    def budget():
+        nonlocal steps
+        steps += 1
+        return steps > 10000  # Bound SQL work, not wall time on a shared CI runner.
+
+    @contextmanager
+    def bounded_connection():
+        with connection() as conn:
+            conn.set_progress_handler(budget, 1000)
+            yield conn
+
+    monkeypatch.setattr(service.store, "connection", bounded_connection)
+    summary = service.review_summary()
+    assert summary["untagged_photos"] == 4500
+    assert summary["untagged_crops"] == 9000
+    assert summary["tagged_photos"] == summary["tagged_crops"] == 500
+    assert summary["partially_tagged_photos"] == summary["extra_pending_crops"] == 500

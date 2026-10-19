@@ -789,10 +789,10 @@ class Service:
         """Count photos separately from crops, using the review page's tag semantics."""
         published = "status='confirmed'" if self.settings.demo else "published=1"
         current = (
-            "WITH current AS (SELECT d.asset_id,r.* FROM detections d "
+            "WITH current AS MATERIALIZED (SELECT d.asset_id,r.* FROM detections d "
             "JOIN assets a ON a.id=d.asset_id JOIN reviews r ON r.detection_id=d.id "
             "WHERE d.revision=a.revision AND d.detector=? AND r.model=?),"
-            f"tagged AS (SELECT DISTINCT asset_id FROM current WHERE {published} "
+            f"tagged AS MATERIALIZED (SELECT DISTINCT asset_id FROM current WHERE {published} "
             "AND pet_id IS NOT NULL UNION SELECT tr.asset_id FROM tag_removals tr "
             "JOIN pets p ON p.tag=tr.tag) "
         )
