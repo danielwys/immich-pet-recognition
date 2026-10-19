@@ -40,6 +40,7 @@ class Decision(BaseModel):
     status: Literal["confirmed", "rejected"]
     pet_id: UUID | None = None
     learn: bool = False
+    expected_pet_id: UUID | None = None
 
 
 class BulkDecision(Decision):
@@ -215,7 +216,11 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
             raise HTTPException(400, "Choose the pet to confirm")
         try:
             service.decide(
-                detection_id, str(body.pet_id) if body.pet_id else None, body.status, body.learn
+                detection_id,
+                str(body.pet_id) if body.pet_id else None,
+                body.status,
+                body.learn,
+                str(body.expected_pet_id) if body.expected_pet_id else None,
             )
             return {"status": body.status, "writeback": "demo only" if settings.demo else "queued"}
         except ValueError as error:
@@ -230,6 +235,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
                     "pet_id": str(item.pet_id) if item.pet_id else None,
                     "status": item.status,
                     "learn": item.learn,
+                    "expected_pet_id": str(item.expected_pet_id) if item.expected_pet_id else None,
                 }
                 for item in body.items
             ]

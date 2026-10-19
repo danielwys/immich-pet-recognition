@@ -206,7 +206,7 @@ def test_bulk_assignment_teaches_and_immediately_suggests_without_model_work(pro
     )
 
 
-def test_bulk_partial_failures_never_teach_invalid_or_published_rows(processed):
+def test_bulk_partial_failures_allow_published_assignments_but_reject_invalid_rows(processed):
     second = add_another_photo(processed)
     first = processed.store.one("SELECT id FROM detections WHERE id<>?", (second,))["id"]
     pet = processed.add_pet("Mochi", "dog")
@@ -227,9 +227,9 @@ def test_bulk_partial_failures_never_teach_invalid_or_published_rows(processed):
                 ]
             },
         )
-        assert response.json()["saved"] == 1
-        assert response.json()["failed"] == 2
-        assert client.get("/api/pets").json()[0]["positive_count"] == 1
+        assert response.json()["saved"] == 2
+        assert response.json()["failed"] == 1
+        assert client.get("/api/pets").json()[0]["positive_count"] == 2
         duplicate = {"detection_id": second, "pet_id": pet["id"], "status": "confirmed"}
         assert (
             client.post("/api/review/batch", json={"items": [duplicate, duplicate]}).status_code
@@ -290,3 +290,65 @@ def test_rejecting_a_suggested_identity_keeps_photo_pending_and_removes_that_sug
         row = client.get("/api/detections").json()["items"][0]
         assert row["recommendation"] is None
         assert row["status"] == "pending"
+
+
+def test_bulk_correction_moves_published_tags_and_examples(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    butter = processed.add_pet("Butter", "dog")
+    rusty = processed.add_pet("Rusty", "dog")
+    processed.decide(detection, butter["id"], "confirmed", learn=True)
+    processed.publish_one()
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        result = client.post(
+            "/api/review/batch",
+            json={
+                "items": [
+                    {
+                        "detection_id": detection,
+                        "pet_id": rusty["id"],
+                        "status": "confirmed",
+                        "learn": True,
+                        "expected_pet_id": butter["id"],
+                    }
+                ]
+            },
+        ).json()
+        assert result["saved"] == 1
+        assert client.get("/api/status").json()["pending_tag_removals"] == 1
+        assert processed.publish_one()
+        galleries = {p["name"]: p for p in client.get("/api/pets").json()}
+        assert galleries["Butter"]["positive_count"] == 0
+        assert galleries["Butter"]["negative_count"] == 1
+        assert galleries["Rusty"]["positive_count"] == 1
+        assert client.get("/api/status").json()["pending_tag_removals"] == 0
+        row = client.get("/api/detections?status=confirmed").json()["items"][0]
+        assert row["pet_id"] == rusty["id"]
+        assert row["published"] == 1
+        assert row["error"] is None
+    asset_id = processed.immich.items[0]["id"]
+    assert processed.immich.assigned_tags[asset_id] == {"Pets/Rusty"}
+
+
+def test_stale_assignment_precondition_prevents_overwriting_another_correction(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    butter = processed.add_pet("Butter", "dog")
+    rusty = processed.add_pet("Rusty", "dog")
+    processed.decide(detection, rusty["id"], "confirmed", learn=True)
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        result = client.post(
+            "/api/review/batch",
+            json={
+                "items": [
+                    {
+                        "detection_id": detection,
+                        "pet_id": butter["id"],
+                        "status": "confirmed",
+                        "learn": True,
+                        "expected_pet_id": butter["id"],
+                    }
+                ]
+            },
+        ).json()
+        assert result["saved"] == 0
+        assert result["failed"] == 1
+        assert processed.store.one("SELECT pet_id FROM reviews")["pet_id"] == rusty["id"]

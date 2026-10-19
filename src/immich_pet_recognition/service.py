@@ -79,6 +79,8 @@ class Service:
         next_poll = 0.0
         while not self.stop_event.is_set():
             try:
+                if self.publish_one():
+                    continue
                 if self.rematch_requested.is_set():
                     self.rematch_requested.clear()
                     self.rematch()
@@ -88,8 +90,6 @@ class Service:
                     self.backfill_requested.clear()
                     self.sync(full=full)
                     next_poll = time.monotonic() + self.settings.poll_seconds
-                if self.publish_one():
-                    continue
                 if self.process_one():
                     continue
             except Exception as error:
@@ -374,7 +374,7 @@ class Service:
             )
             self.gallery_changed()
 
-    def decide(self, detection_id, pet_id, status, learn=False):
+    def decide(self, detection_id, pet_id, status, learn=False, expected_pet_id=None):
         with self.model_lock:
             detection = self.store.one(
                 "SELECT d.* FROM detections d JOIN assets a ON a.id=d.asset_id "
@@ -395,16 +395,43 @@ class Service:
             )
             if row is None:
                 raise ValueError("This detection is not ready for review")
-            if row["published"]:
-                raise ValueError(
-                    "Already published; correct this tag in Immich before changing review"
-                )
+            if expected_pet_id is not None and row["pet_id"] != expected_pet_id:
+                raise ValueError("Assignment changed; refresh before correcting this photo")
+            changed = row["pet_id"] != pet_id or row["status"] != status
+            gallery_updated = False
             with self.store.connection() as conn:
                 conn.execute(
-                    "UPDATE reviews SET pet_id=?,status=?,error=NULL "
+                    "UPDATE reviews SET pet_id=?,status=?,published=?,error=NULL "
                     "WHERE detection_id=? AND model=?",
-                    (pet_id, status, detection_id, self.settings.recognizer_key),
+                    (
+                        pet_id,
+                        status,
+                        0 if changed else row["published"],
+                        detection_id,
+                        self.settings.recognizer_key,
+                    ),
                 )
+                if changed and row["status"] == "confirmed" and row["pet_id"]:
+                    old_pet = conn.execute(
+                        "SELECT tag FROM pets WHERE id=?", (row["pet_id"],)
+                    ).fetchone()
+                    if not self.settings.demo:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO tag_removals VALUES (?,?,?,?)",
+                            (
+                                detection_id,
+                                self.settings.recognizer_key,
+                                detection["asset_id"],
+                                old_pet["tag"],
+                            ),
+                        )
+                    gallery_updated = bool(
+                        conn.execute(
+                            "DELETE FROM reference_images WHERE pet_id=? AND detection_id=? "
+                            "AND kind='positive'",
+                            (row["pet_id"], detection_id),
+                        ).rowcount
+                    )
                 if learn and status == "confirmed":
                     # Only an explicit human assignment can teach the gallery.
                     conn.execute(
@@ -423,7 +450,7 @@ class Service:
                             "ON CONFLICT(pet_id,detection_id) DO UPDATE SET kind='negative'",
                             (row["pet_id"], detection_id),
                         )
-            if learn and status == "confirmed":
+            if gallery_updated or (learn and status == "confirmed"):
                 self.gallery_changed()
         self.wake_event.set()
 
@@ -433,7 +460,13 @@ class Service:
         with self.model_lock:
             for item in items:
                 try:
-                    self.decide(item["detection_id"], item["pet_id"], item["status"], item["learn"])
+                    self.decide(
+                        item["detection_id"],
+                        item["pet_id"],
+                        item["status"],
+                        item["learn"],
+                        item.get("expected_pet_id"),
+                    )
                     results.append({"id": item["detection_id"], "saved": True})
                 except ValueError as error:
                     results.append(
@@ -443,7 +476,68 @@ class Service:
 
     def publish_one(self):
         with self.model_lock:
-            return self._publish_one()
+            return self._publish_one() or self._remove_one()
+
+    def _apply_tag_removals(self, row, asset):
+        for removal in self.store.rows(
+            "SELECT tag FROM tag_removals WHERE detection_id=? AND model=?",
+            (row["detection_id"], row["model"]),
+        ):
+            # Other animals in the same photo can still legitimately need this tag.
+            needed = self.store.one(
+                "SELECT 1 FROM reviews r JOIN detections d ON d.id=r.detection_id "
+                "JOIN pets p ON p.id=r.pet_id WHERE d.asset_id=? AND d.revision=? "
+                "AND d.detector=? AND r.model=? AND r.status='confirmed' AND p.tag=?",
+                (
+                    row["asset_id"],
+                    row["revision"],
+                    self.settings.detector_key,
+                    row["model"],
+                    removal["tag"],
+                ),
+            )
+            if not needed:
+                self.immich.untag(row["asset_id"], removal["tag"], asset)
+
+    def _finish_tag_change(self, row, published):
+        with self.store.connection() as conn:
+            conn.execute(
+                "DELETE FROM tag_removals WHERE detection_id=? AND model=?",
+                (row["detection_id"], row["model"]),
+            )
+            conn.execute(
+                "UPDATE reviews SET published=?,error=NULL WHERE detection_id=? AND model=?",
+                (published, row["detection_id"], row["model"]),
+            )
+
+    def _remove_one(self):
+        if self.settings.demo:
+            return False
+        row = self.store.one(
+            "SELECT r.*,d.asset_id,d.revision FROM reviews r "
+            "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+            "WHERE r.status<>'confirmed' AND r.error IS NULL AND r.model=? "
+            "AND d.detector=? AND d.revision=a.revision "
+            "AND EXISTS(SELECT 1 FROM tag_removals t WHERE t.detection_id=r.detection_id "
+            "AND t.model=r.model) LIMIT 1",
+            (self.settings.recognizer_key, self.settings.detector_key),
+        )
+        if row is None:
+            return False
+        try:
+            asset = self.immich.asset(row["asset_id"])
+            if not eligible(asset) or asset_revision(asset) != row["revision"]:
+                raise ValueError("Asset changed or is unavailable; resync before removing tags")
+            if self.stop_event.is_set():
+                return False
+            self._apply_tag_removals(row, asset)
+            self._finish_tag_change(row, 0)
+        except Exception as error:
+            self.store.execute(
+                "UPDATE reviews SET error=? WHERE detection_id=? AND model=?",
+                (self.safe_error(error), row["detection_id"], row["model"]),
+            )
+        return True
 
     def _publish_one(self):
         row = self.store.one(
@@ -470,10 +564,8 @@ class Service:
                 if self.stop_event.is_set():
                     return False
                 self.immich.tag(row["asset_id"], row["tag"])
-                self.store.execute(
-                    "UPDATE reviews SET published=1,error=NULL WHERE detection_id=? AND model=?",
-                    (row["detection_id"], row["model"]),
-                )
+                self._apply_tag_removals(row, asset)
+                self._finish_tag_change(row, 1)
             except Exception as error:
                 self.store.execute(
                     "UPDATE reviews SET error=? WHERE detection_id=? AND model=?",
@@ -487,7 +579,7 @@ class Service:
             "WHERE status='failed' AND pipeline=?",
             (self.settings.pipeline_key,),
         )
-        self.store.execute("UPDATE reviews SET error=NULL WHERE status='confirmed' AND published=0")
+        self.store.execute("UPDATE reviews SET error=NULL WHERE published=0")
         self.wake_event.set()
 
     def status(self):
@@ -515,6 +607,9 @@ class Service:
             "match_threshold": self.settings.match_threshold,
             "match_margin": self.settings.match_margin,
             "suggestions_updating": self.suggestions_pending(),
+            "pending_tag_removals": self.store.one("SELECT count(*) total FROM tag_removals")[
+                "total"
+            ],
             "reviews": {
                 r["status"]: r["count"]
                 for r in self.store.rows(

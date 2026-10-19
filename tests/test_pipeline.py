@@ -241,3 +241,96 @@ def test_unfinished_gallery_matching_is_recovered_on_restart(processed):
     assert not restarted.suggestions_pending()
     assert restarted.store.one("SELECT status FROM reviews")["status"] == "confirmed"
     restarted.close()
+
+
+def test_untag_removes_assignment_and_example_without_deleting_photo(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    pet = processed.add_pet("Butter", "dog")
+    processed.decide(detection, pet["id"], "confirmed", learn=True)
+    processed.publish_one()
+    processed.decide(detection, None, "rejected", expected_pet_id=pet["id"])
+    assert processed.references()[0]["positive"] == []
+    assert processed.publish_one()
+    assert processed.immich.assigned_tags[processed.immich.items[0]["id"]] == set()
+    assert len(processed.immich.items) == 1
+    assert processed.store.one("SELECT status,published,error FROM reviews") == {
+        "status": "rejected",
+        "published": 0,
+        "error": None,
+    }
+    assert not processed.publish_one()
+    processed.rematch()
+    assert processed.store.one("SELECT status FROM reviews")["status"] == "rejected"
+
+
+def test_failed_tag_correction_survives_restart_and_retries(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    first = processed.add_pet("Butter", "dog")
+    second = processed.add_pet("Rusty", "dog")
+    processed.decide(detection, first["id"], "confirmed", learn=True)
+    processed.publish_one()
+    processed.decide(detection, second["id"], "confirmed", learn=True)
+    processed.immich.fail_untag = True
+    processed.publish_one()
+    assert processed.store.one("SELECT published,error FROM reviews") == {
+        "published": 0,
+        "error": "Test tag removal failure",
+    }
+    assert processed.store.one("SELECT count(*) n FROM tag_removals")["n"] == 1
+    restarted = Service(
+        processed.settings, processed.immich, processed.detector, processed.recognizer
+    )
+    restarted.immich.fail_untag = False
+    restarted.retry_failed()
+    assert restarted.publish_one()
+    assert restarted.immich.assigned_tags[restarted.immich.items[0]["id"]] == {"Pets/Rusty"}
+    assert restarted.store.one("SELECT count(*) n FROM tag_removals")["n"] == 0
+    assert restarted.store.one("SELECT published,error FROM reviews") == {
+        "published": 1,
+        "error": None,
+    }
+    restarted.close()
+
+
+def test_tag_removal_keeps_a_tag_needed_by_another_animal_in_the_photo(processed):
+    first_crop = processed.store.one("SELECT * FROM detections")
+    second_crop = {**first_crop, "id": "b" * 32}
+    processed.store.execute(
+        "INSERT INTO detections VALUES "
+        "(:id,:asset_id,:revision,:detector,:species,:score,:box,:crop)",
+        second_crop,
+    )
+    processed.store.save_embedding(
+        second_crop["id"],
+        processed.settings.recognizer_key,
+        processed.store.embedding(first_crop["id"], processed.settings.recognizer_key),
+    )
+    processed.evaluate(second_crop)
+    butter = processed.add_pet("Butter", "dog")
+    rusty = processed.add_pet("Rusty", "dog")
+    for crop in [first_crop, second_crop]:
+        processed.decide(crop["id"], butter["id"], "confirmed", learn=True)
+        processed.publish_one()
+    processed.decide(first_crop["id"], rusty["id"], "confirmed", learn=True)
+    processed.publish_one()
+    assert processed.immich.untag_calls == []
+    assert processed.immich.assigned_tags[first_crop["asset_id"]] == {"Pets/Butter", "Pets/Rusty"}
+    processed.decide(second_crop["id"], None, "rejected")
+    processed.publish_one()
+    assert processed.immich.assigned_tags[first_crop["asset_id"]] == {"Pets/Rusty"}
+
+
+def test_reversing_a_partly_published_correction_keeps_only_final_identity(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    butter = processed.add_pet("Butter", "dog")
+    rusty = processed.add_pet("Rusty", "dog")
+    processed.decide(detection, butter["id"], "confirmed", learn=True)
+    processed.publish_one()
+    processed.decide(detection, rusty["id"], "confirmed", learn=True)
+    processed.immich.fail_untag = True
+    processed.publish_one()
+    processed.decide(detection, butter["id"], "confirmed", learn=True)
+    processed.immich.fail_untag = False
+    processed.publish_one()
+    assert processed.immich.assigned_tags[processed.immich.items[0]["id"]] == {"Pets/Butter"}
+    assert processed.store.one("SELECT count(*) n FROM tag_removals")["n"] == 0

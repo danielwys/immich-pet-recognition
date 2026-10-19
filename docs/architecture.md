@@ -46,13 +46,21 @@ including HTTP-200 bulk responses that contain errors. Failed writes need an exp
 Human review decisions are stored per detection/model. Confirmed/rejected decisions are never
 overwritten by rematching under that model. Switching models creates fresh review records, while
 leaving already-published Immich tags intact. A decision lock prevents a human rejection racing
-with publication. The service adds tags only; corrective tag removal happens in Immich.
+with publication. Explicit corrections can replace or remove the corresponding pet tag.
 
-Bulk review validates each crop under the same decision lock. Valid rows are saved and invalid,
-stale, or already-published rows report individual errors. An explicit human assignment can also
+Bulk review validates each crop under the same decision lock. Valid rows are saved and invalid
+or stale rows report individual errors. Published assignments can be corrected. An explicit human assignment can also
 save a positive example in the same transaction. Correcting an identity removes conflicting
 positive membership and records the prior identity as a negative. Automatic evaluation never
 teaches the gallery. Existing confirmed crops can be enrolled in bulk without changing tags.
+
+Corrections persist old tag associations in `tag_removals` in the same transaction as the local
+assignment change. Publication adds the correct tag first, then removes old tags, and verifies
+their absence through the asset API before marking the assignment published. Another confirmed
+animal in the same photo can keep an old tag. Pure removal moves the crop to rejected, removes
+its positive example, and queues tag removal without deleting the photo. Failed operations keep
+their durable removal records and retry idempotently; writeback runs before gallery rematching.
+Clients can supply the expected old pet ID to reject stale corrections.
 
 Gallery revisions persist in SQLite so unfinished rematching resumes after a restart. A rematch
 reuses the gallery vectors for the pass and releases the model lock between crops to keep review

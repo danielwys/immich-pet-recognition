@@ -1,5 +1,13 @@
 # Validation
 
+## Published assignment correction checked on 19 October 2026
+
+**57 tests pass.** Added coverage checks published reassignment and untagging, correcting positive
+and negative examples, stale-assignment preconditions, shared-photo tags for multiple animals,
+retry after a partial remote write and restart, reversal of a partial correction, bulk untag
+response validation, and verification that Immich actually removed the tag. The operation uses
+the existing `asset.read` and `tag.asset` scopes and does not delete photos.
+
 ## Review redesign checked on 19 October 2026
 
 **47 tests pass**, plus Ruff lint/formatting and a JavaScript syntax check. Added checks cover

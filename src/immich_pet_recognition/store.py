@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS reviews (
  error TEXT, PRIMARY KEY(detection_id, model)
 );
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tag_removals (
+ detection_id TEXT NOT NULL, model TEXT NOT NULL, asset_id TEXT NOT NULL, tag TEXT NOT NULL,
+ PRIMARY KEY(detection_id, model, tag),
+ FOREIGN KEY(detection_id, model) REFERENCES reviews(detection_id, model)
+);
 CREATE INDEX IF NOT EXISTS jobs_ready ON jobs(status, available_at);
 CREATE INDEX IF NOT EXISTS detections_asset ON detections(asset_id, revision, detector);
 """

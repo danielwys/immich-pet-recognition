@@ -26,6 +26,9 @@ class FakeImmich:
             }
         ]
         self.tag_calls = []
+        self.untag_calls = []
+        self.assigned_tags = {}
+        self.fail_untag = False
         self.preview_calls = 0
         self.fail_tag = False
 
@@ -33,7 +36,12 @@ class FakeImmich:
         yield from self.items
 
     def asset(self, asset_id):
-        return next(a for a in self.items if a["id"] == asset_id)
+        return {
+            **next(a for a in self.items if a["id"] == asset_id),
+            "tags": [
+                {"id": name, "value": name} for name in self.assigned_tags.get(asset_id, set())
+            ],
+        }
 
     def preview(self, asset_id):
         self.preview_calls += 1
@@ -45,6 +53,13 @@ class FakeImmich:
         if self.fail_tag:
             raise RuntimeError("Test write failure")
         self.tag_calls.append((asset_id, name))
+        self.assigned_tags.setdefault(asset_id, set()).add(name)
+
+    def untag(self, asset_id, name, asset):
+        if self.fail_untag:
+            raise RuntimeError("Test tag removal failure")
+        self.untag_calls.append((asset_id, name))
+        self.assigned_tags.setdefault(asset_id, set()).discard(name)
 
     def close(self):
         pass

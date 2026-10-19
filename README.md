@@ -108,6 +108,17 @@ To teach from photos confirmed in the original interface, open **Confirmed**, se
 and choose **Use confirmed as examples**. This also works for already-tagged photos and does not
 rewrite their tags. Batch results report individual failures instead of silently losing them.
 
+To correct an assignment, open **Confirmed**, filter to the wrong pet, select the affected crops,
+and click the correct pet's name. Published tags can be reassigned. The correct tag is added,
+then the old tag is removed when no other confirmed animal in that photo still needs it.
+With the examples option enabled, the crop becomes a positive example for the correct pet and
+a negative example for the old pet. Conflicting positive examples are removed.
+
+To untag without assigning another pet, select confirmed crops and choose **Remove tags**, or
+use **Remove tag** on a card. This removes the assignment and its positive example and moves
+the crop to **Dismissed**; the photo itself is retained. Failed tag changes remain visible and
+can be retried in **Processing**. Pending removals survive restarts and are verified against Immich.
+
 ## Automatic tagging
 
 Check performance on a held-out set that is not in the reference gallery. Tune the similarity
@@ -117,7 +128,7 @@ are placeholders, not model-vendor recommendations or proven accuracy guarantees
 Set `PET_AUTO_TAG=true` only after calibration and restart the service. A match must clear both
 thresholds and have at least `PET_MIN_REFERENCES` positive references. Explicitly rejected or
 confirmed decisions survive rematching. Confirmed tags are additive; the service never removes
-existing tags. Correct already-published mistakes in Immich. Only explicit human assignments
+unrelated tags. Published assignments can be corrected or removed from the review UI. Only explicit human assignments
 with the examples option enabled, or an explicit example action, change the reference gallery.
 
 ## Cache, persistence, and upgrades

@@ -133,13 +133,16 @@
             <strong id="selection-count" aria-live="polite">0 selected</strong>
           </div>
           <div class="batch-actions">
-            <span>Assign selected:</span>
+            <span id="assignment-label">Assign selected:</span>
             <div id="batch-pets" class="assignment-buttons"></div>
             <button id="accept-suggestions" class="primary" disabled>
               Accept suggested identities
             </button>
             <button id="teach-confirmed" class="secondary" disabled>
               Use confirmed as examples
+            </button>
+            <button id="remove-tags" class="secondary" disabled>
+              Remove tags
             </button>
             <button id="dismiss-selected" class="quiet" disabled>
               Dismiss selected

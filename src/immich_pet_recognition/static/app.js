@@ -236,6 +236,10 @@ function updateSelection() {
     .querySelector(".batch-bar")
     .classList.toggle("has-selection", chosen.length > 0);
   $("selection-count").textContent = `${chosen.length} selected`;
+  $("assignment-label").textContent =
+    chosen.length && chosen.every((item) => item.status === "confirmed")
+      ? "Change selected to:"
+      : "Assign selected:";
   $("clear-selection").disabled = busy || !chosen.length;
   $("clear-selection").classList.toggle("hidden", allShownSelected);
   $("select-page").textContent = allShownSelected
@@ -256,6 +260,14 @@ function updateSelection() {
     busy ||
     !chosen.length ||
     chosen.some((item) => item.status !== "confirmed" || !item.pet_id);
+  $("remove-tags").disabled =
+    busy ||
+    !chosen.length ||
+    chosen.some((item) => item.status !== "confirmed");
+  $("remove-tags").classList.toggle(
+    "hidden",
+    !visibleItems.some((item) => item.status === "confirmed"),
+  );
   $("dismiss-selected").disabled =
     busy || !chosen.length || chosen.some((item) => item.published);
   const assignments = $("batch-pets");
@@ -268,7 +280,7 @@ function updateSelection() {
         () => assign(chosenItems(), pet),
         busy ||
           !chosen.length ||
-          chosen.some((item) => item.published || item.species !== pet.species),
+          chosen.some((item) => item.species !== pet.species),
       ),
     ),
   );
@@ -303,7 +315,7 @@ async function submitBatch(items, endpoint = "review/batch") {
     });
     const failures = result.results.filter((item) => !item.saved);
     $("batch-feedback").textContent =
-      `${result.saved} saved${result.failed ? ` · ${result.failed} could not be saved: ${failures[0].error}` : ""}. ${endpoint === "references/batch" || items.some((item) => item.learn) ? "Examples updated. Suggestions are being refreshed." : ""}${status.demo ? " Demo only; no Immich tags written." : endpoint === "review/batch" && items.some((item) => item.status === "confirmed") ? " Immich tag writes queued." : ""}`;
+      `${result.saved} saved${result.failed ? ` · ${result.failed} could not be saved: ${failures[0].error}` : ""}. ${endpoint === "references/batch" || items.some((item) => item.learn) ? "Examples updated. Suggestions are being refreshed." : ""}${status.demo ? " Demo only; no Immich tags written." : endpoint === "review/batch" ? " Immich tag changes queued." : ""}`;
   } catch (error) {
     $("batch-feedback").textContent = error.message;
   } finally {
@@ -331,6 +343,7 @@ function assign(items, pet) {
       status: "confirmed",
       pet_id: pet.id,
       learn,
+      expected_pet_id: item.status === "confirmed" ? item.pet_id : null,
     })),
   );
 }
@@ -341,6 +354,7 @@ function dismiss(items) {
       status: "rejected",
       pet_id: null,
       learn: false,
+      expected_pet_id: item.status === "confirmed" ? item.pet_id : null,
     })),
   );
 }
@@ -513,7 +527,7 @@ async function renderReview() {
       );
     content.append(line, node("p", "filename", item.name));
     if (rec) content.append(renderGates(rec));
-    if (!item.published) {
+    {
       const actions = node("div", "card-actions");
       if (rec) {
         actions.append(
@@ -533,13 +547,26 @@ async function renderReview() {
       const compatible = pets.filter(
         (pet) => pet.species === item.species && pet.id !== rec?.pet_id,
       );
-      if (compatible.length) options.append(node("span", "", "Assign:"));
+      if (compatible.length)
+        options.append(
+          node(
+            "span",
+            "",
+            item.status === "confirmed" ? "Change to:" : "Assign:",
+          ),
+        );
       compatible.forEach((pet) =>
         options.append(
           button(pet.name, "assign-button", () => assign([item], pet)),
         ),
       );
-      options.append(button("Dismiss", "quiet", () => dismiss([item])));
+      options.append(
+        button(
+          item.status === "confirmed" ? "Remove tag" : "Dismiss",
+          "quiet",
+          () => dismiss([item]),
+        ),
+      );
       content.append(options);
     }
     if (item.status === "confirmed") {
@@ -730,6 +757,7 @@ $("accept-suggestions").addEventListener("click", () =>
 $("teach-confirmed").addEventListener("click", () =>
   teachConfirmed(chosenItems()),
 );
+$("remove-tags").addEventListener("click", () => dismiss(chosenItems()));
 $("dismiss-selected").addEventListener("click", () => dismiss(chosenItems()));
 $("refresh").addEventListener("click", () =>
   refresh().catch((e) => toast(e.message)),

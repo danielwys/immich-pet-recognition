@@ -88,3 +88,51 @@ def test_old_server_version_rejected():
     )
     with pytest.raises(ImmichError, match="3.2"):
         client.version()
+
+
+@pytest.mark.parametrize("error", [None, "not_found", "no_permission"])
+def test_untag_checks_bulk_result_and_verifies_the_tag_is_gone(error):
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.method == "DELETE":
+            assert request.url.path == "/api/tags/butter-tag/assets"
+            assert json.loads(request.content) == {"ids": ["asset-id"]}
+            return httpx.Response(
+                200, json=[{"id": "asset-id", "success": error is None, "error": error}]
+            )
+        return httpx.Response(200, json={"tags": [{"id": "rusty-tag", "value": "Pets/Rusty"}]})
+
+    client = ImmichClient("http://immich", "secret", httpx.MockTransport(handler))
+    asset = {"tags": [{"id": "butter-tag", "value": "Pets/Butter"}]}
+    if error == "no_permission":
+        with pytest.raises(ImmichError, match="tag.asset"):
+            client.untag("asset-id", "Pets/Butter", asset)
+    else:
+        client.untag("asset-id", "Pets/Butter", asset)
+        assert calls[-1] == ("GET", "/api/assets/asset-id")
+
+
+def test_untag_refuses_missing_tag_metadata_and_detects_unverified_removal():
+    client = ImmichClient(
+        "http://immich",
+        "secret",
+        httpx.MockTransport(lambda request: httpx.Response(200, json={"tags": []})),
+    )
+    with pytest.raises(ImmichError, match="include asset tags"):
+        client.untag("asset-id", "Pets/Butter", {})
+    calls = []
+
+    def handler(request):
+        calls.append(request.method)
+        if request.method == "DELETE":
+            return httpx.Response(200, json=[{"id": "asset-id", "success": True}])
+        return httpx.Response(200, json={"tags": [{"id": "tag-id", "value": "Pets/Butter"}]})
+
+    client = ImmichClient("http://immich", "secret", httpx.MockTransport(handler))
+    with pytest.raises(ImmichError, match="not verified"):
+        client.untag(
+            "asset-id", "Pets/Butter", {"tags": [{"id": "tag-id", "value": "Pets/Butter"}]}
+        )
+    assert calls == ["DELETE", "GET"]

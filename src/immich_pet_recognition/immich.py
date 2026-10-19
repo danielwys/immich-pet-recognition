@@ -88,3 +88,20 @@ class ImmichClient:
         result = next((r for r in results if r["id"] == asset_id), None)
         if result is None or (not result["success"] and result.get("error") != "duplicate"):
             raise ImmichError("Immich could not attach this tag; check tag.asset permission")
+
+    def untag(self, asset_id: str, name: str, asset: dict):
+        tags = asset.get("tags")
+        if not isinstance(tags, list):
+            raise ImmichError("Immich did not include asset tags; cannot verify tag removal")
+        tag = next((tag for tag in tags if tag["value"] == name), None)
+        if tag is None:
+            return
+        results = self.request(
+            "DELETE", f"tags/{tag['id']}/assets", json={"ids": [asset_id]}
+        ).json()
+        result = next((item for item in results if item["id"] == asset_id), None)
+        if result is None or (not result["success"] and result.get("error") != "not_found"):
+            raise ImmichError("Immich could not remove this tag; check tag.asset permission")
+        remaining = self.asset(asset_id).get("tags")
+        if not isinstance(remaining, list) or any(tag["value"] == name for tag in remaining):
+            raise ImmichError("Tag removal was not verified in Immich; retry this change")
