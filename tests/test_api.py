@@ -518,3 +518,56 @@ def test_demo_assignment_moves_to_tagged_without_writing_to_immich(tmp_path):
         tagged = client.get("/api/detections?status=all&tagging=tagged").json()
         assert tagged["total"] == 1
         assert tagged["items"][0]["photo_tags"][0]["name"] == pet["name"]
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("learn", [False, True])
+def test_human_assignment_overrides_wrong_species_in_single_and_bulk_review(processed, bulk, learn):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    processed.store.execute("UPDATE detections SET species='cat' WHERE id=?", (detection,))
+    cat = processed.add_pet("Cat example", "cat")
+    wang = processed.add_pet("Wang Wang", "dog")
+    processed.add_reference(cat["id"], detection, "positive")
+    revision = processed.store.state("gallery_revision")
+    body = {"status": "confirmed", "pet_id": wang["id"], "learn": learn}
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        if bulk:
+            response = client.post(
+                "/api/review/batch", json={"items": [{"detection_id": detection, **body}]}
+            )
+            assert response.json()["saved"] == 1
+            assert response.json()["failed"] == 0
+        else:
+            response = client.post(f"/api/detections/{detection}/decision", json=body)
+        assert response.status_code == 200
+        assert processed.store.one("SELECT species FROM detections")["species"] == "dog"
+        assert processed.store.one("SELECT pet_id,status FROM reviews") == {
+            "pet_id": wang["id"],
+            "status": "confirmed",
+        }
+        pets = {pet["name"]: pet for pet in client.get("/api/pets").json()}
+        assert pets["Wang Wang"]["positive_count"] == int(learn)
+        assert pets["Cat example"]["positive_count"] == 0
+        assert processed.store.state("gallery_revision") != revision
+        assert processed.publish_one()
+        tagged = client.get("/api/detections?status=all&tagging=tagged").json()["items"][0]
+        assert tagged["species"] == "dog"
+        assert tagged["pet_name"] == "Wang Wang"
+        assert tagged["published"] == 1
+
+
+def test_invalid_or_stale_species_correction_leaves_the_crop_unchanged(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    processed.store.execute("UPDATE detections SET species='cat' WHERE id=?", (detection,))
+    wang = processed.add_pet("Wang Wang", "dog")
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        for body in [
+            {"status": "confirmed", "pet_id": str(uuid4())},
+            {"status": "confirmed", "pet_id": wang["id"], "expected_pet_id": str(uuid4())},
+        ]:
+            assert (
+                client.post(f"/api/detections/{detection}/decision", json=body).status_code == 400
+            )
+        assert processed.store.one("SELECT species FROM detections")["species"] == "cat"
+        assert processed.store.one("SELECT status FROM reviews")["status"] == "pending"
+        assert not processed.publish_one()

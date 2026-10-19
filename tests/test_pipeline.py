@@ -435,3 +435,45 @@ def test_pause_keeps_published_automatic_tags_and_human_correction_clears_source
     assert processed.store.rows("SELECT * FROM automatic_reviews") == []
     assert processed.pets()[0]["auto_tagged_count"] == 0
     assert processed.pets()[0]["positive_count"] == 1
+
+
+def test_corrected_species_survives_restart_rematch_and_repeated_detector_output(processed):
+    from immich_pet_recognition.models import Detection
+
+    crop = processed.store.one("SELECT * FROM detections")
+    processed.store.execute("UPDATE detections SET species='cat'")
+    processed.detector.items = [Detection("cat", 0.95, (10, 10, 80, 70))]
+    wang = processed.add_pet("Wang Wang", "dog")
+    processed.decide(crop["id"], wang["id"], "confirmed", learn=True)
+    processed.publish_one()
+    restarted = Service(
+        processed.settings, processed.immich, processed.detector, processed.recognizer
+    )
+    restarted.rematch()
+    restarted.store.execute("DELETE FROM passes")
+    restarted.store.execute("UPDATE jobs SET status='queued'")
+    assert restarted.process_one()
+    assert restarted.store.one("SELECT species FROM detections")["species"] == "dog"
+    assert restarted.store.one("SELECT pet_id,status,published FROM reviews") == {
+        "pet_id": wang["id"],
+        "status": "confirmed",
+        "published": 1,
+    }
+    assert restarted.pets()[0]["positive_count"] == 1
+    assert not restarted.publish_one()
+
+
+def test_cross_species_correction_moves_published_tags_without_invalid_examples(processed):
+    crop = processed.store.one("SELECT * FROM detections")
+    processed.store.execute("UPDATE detections SET species='cat'")
+    cat = processed.add_pet("Cat example", "cat")
+    wang = processed.add_pet("Wang Wang", "dog")
+    processed.decide(crop["id"], cat["id"], "confirmed", learn=True)
+    processed.publish_one()
+    processed.decide(crop["id"], wang["id"], "confirmed", learn=True)
+    processed.publish_one()
+    assert processed.immich.assigned_tags[crop["asset_id"]] == {"Pets/Wang Wang"}
+    pets = {pet["name"]: pet for pet in processed.pets()}
+    assert pets["Wang Wang"]["positive_count"] == 1
+    assert pets["Cat example"]["positive_count"] == pets["Cat example"]["negative_count"] == 0
+    assert processed.store.rows("SELECT * FROM tag_removals") == []

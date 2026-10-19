@@ -112,7 +112,13 @@ To correct an assignment, open **Tagged**, filter to the wrong pet, select the a
 and click the correct pet's name. Published tags can be reassigned. The correct tag is added,
 then the old tag is removed when no other confirmed animal in that photo still needs it.
 With the examples option enabled, the crop becomes a positive example for the correct pet and
-a negative example for the old pet. Conflicting positive examples are removed.
+a negative example for the old pet when both pets have the same species. Conflicting positive examples are removed.
+
+The detector's cat/dog label is a guess, and never blocks a manual assignment. Choose any pet
+on a card or in a batch; assigning a dog to a crop detected as a cat also corrects that crop's
+species to dog in the same transaction. Incompatible old gallery examples are removed, and the
+normal examples checkbox controls whether to learn the new identity. Species corrections persist
+across restarts and cached rescans. Automatic matching still compares pets of the same species.
 
 To untag without assigning another pet, select confirmed crops and choose **Remove tags**, or
 use **Remove tag** on a card. This removes the assignment and its positive example and moves

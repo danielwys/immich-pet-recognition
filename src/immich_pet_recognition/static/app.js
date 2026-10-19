@@ -394,9 +394,7 @@ function updateSelection() {
         pet.name,
         "assign-button",
         () => assign(chosenItems(), pet),
-        busy ||
-          !chosen.length ||
-          chosen.some((item) => item.species !== pet.species),
+        busy || !chosen.length,
       ),
     ),
   );
@@ -627,7 +625,14 @@ async function renderReview() {
     const img = node("img");
     img.alt = `Detected ${item.species} in ${item.name}`;
     img.loading = "lazy";
-    wrap.append(img, node("span", "species", item.species), checkbox);
+    const speciesLabel = node(
+      "span",
+      "species",
+      item.status === "confirmed" ? item.species : "Detected: " + item.species,
+    );
+    speciesLabel.title =
+      "Assigning a pet also corrects this crop’s species if the detector got it wrong.";
+    wrap.append(img, speciesLabel, checkbox);
     const tagged = item.photo_tags.length > 0;
     const syncing =
       item.status === "confirmed" && !item.published && !status.demo;
@@ -663,11 +668,14 @@ async function renderReview() {
           "span",
           "quality " + (rec?.confident ? "strong" : ""),
           !rec
-            ? pets.some(
-                (pet) => pet.species === item.species && pet.positive_count > 0,
-              )
-              ? "Unmatched"
-              : "Needs examples"
+            ? pets.length && !pets.some((pet) => pet.species === item.species)
+              ? "Check detected type"
+              : pets.some(
+                    (pet) =>
+                      pet.species === item.species && pet.positive_count > 0,
+                  )
+                ? "Unmatched"
+                : "Needs examples"
             : rec.confident
               ? "Strong suggestion"
               : rec.references < status.min_references
@@ -739,7 +747,6 @@ async function renderReview() {
       const options = node("div", "pet-options");
       const compatible = pets.filter(
         (pet) =>
-          pet.species === item.species &&
           pet.id !== rec?.pet_id &&
           (item.status !== "confirmed" || pet.id !== item.pet_id),
       );
@@ -766,6 +773,19 @@ async function renderReview() {
         ),
       );
       content.append(options);
+      if (
+        item.status !== "confirmed" &&
+        pets.length &&
+        !pets.some((pet) => pet.species === item.species)
+      ) {
+        content.append(
+          node(
+            "p",
+            "review-explanation",
+            "Wrong animal type? Choose the right pet above; its species will replace the detected label.",
+          ),
+        );
+      }
     }
     if (item.status === "confirmed") {
       content.append(

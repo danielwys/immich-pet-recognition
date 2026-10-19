@@ -474,8 +474,8 @@ class Service:
                 raise ValueError("Detection no longer matches the current asset revision")
             if pet_id:
                 pet = self.store.one("SELECT * FROM pets WHERE id=?", (pet_id,))
-                if pet is None or pet["species"] != detection["species"]:
-                    raise ValueError("Choose a pet with the same species")
+                if pet is None:
+                    raise ValueError("Pet not found")
             if status == "confirmed" and not pet_id:
                 raise ValueError("Choose the pet to confirm")
             row = self.store.one(
@@ -489,6 +489,19 @@ class Service:
             changed = row["pet_id"] != pet_id or row["status"] != status
             gallery_updated = False
             with self.store.connection() as conn:
+                if status == "confirmed" and pet["species"] != detection["species"]:
+                    # A human identity assignment also corrects the detector's species.
+                    conn.execute(
+                        "UPDATE detections SET species=? WHERE id=?",
+                        (pet["species"], detection_id),
+                    )
+                    gallery_updated = bool(
+                        conn.execute(
+                            "DELETE FROM reference_images WHERE detection_id=? AND pet_id IN "
+                            "(SELECT id FROM pets WHERE species<>?)",
+                            (detection_id, pet["species"]),
+                        ).rowcount
+                    )
                 conn.execute(
                     "DELETE FROM automatic_reviews WHERE detection_id=? AND model=?",
                     (detection_id, self.settings.recognizer_key),
@@ -518,7 +531,7 @@ class Service:
                                 old_pet["tag"],
                             ),
                         )
-                    gallery_updated = bool(
+                    gallery_updated |= bool(
                         conn.execute(
                             "DELETE FROM reference_images WHERE pet_id=? AND detection_id=? "
                             "AND kind='positive'",
@@ -539,9 +552,10 @@ class Service:
                     )
                     if row["pet_id"] and row["pet_id"] != pet_id:
                         conn.execute(
-                            "INSERT INTO reference_images VALUES (?,?,'negative') "
+                            "INSERT INTO reference_images SELECT id,?,'negative' FROM pets "
+                            "WHERE id=? AND species=? "
                             "ON CONFLICT(pet_id,detection_id) DO UPDATE SET kind='negative'",
-                            (row["pet_id"], detection_id),
+                            (detection_id, row["pet_id"], pet["species"]),
                         )
             if gallery_updated or (learn and status == "confirmed"):
                 self.gallery_changed()
