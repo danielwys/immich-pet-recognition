@@ -1,3 +1,4 @@
+import hashlib
 import secrets
 import sqlite3
 from contextlib import asynccontextmanager
@@ -6,7 +7,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -98,6 +99,12 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
             )
 
     auth = [Depends(authenticate)]
+    asset_version = hashlib.sha256(
+        (STATIC / "app.js").read_bytes() + (STATIC / "style.css").read_bytes()
+    ).hexdigest()[:12]
+    index_html = (STATIC / "index.html").read_text()
+    for asset in ("app.js", "style.css"):
+        index_html = index_html.replace(f"/static/{asset}", f"/static/{asset}?v={asset_version}")
 
     @app.get("/health")
     def health():
@@ -105,7 +112,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(STATIC / "index.html")
+        return HTMLResponse(index_html, headers={"Cache-Control": "no-store"})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

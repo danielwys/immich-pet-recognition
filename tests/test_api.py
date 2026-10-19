@@ -26,6 +26,16 @@ def test_private_data_and_controls_require_token(processed):
         assert "test-api-key" not in client.get("/api/status", headers=AUTH).text
 
 
+def test_ui_updates_do_not_mix_old_cached_scripts_with_new_markup(processed):
+    with TestClient(create_app(processed.settings, processed)) as client:
+        page = client.get("/")
+        assert page.headers["cache-control"] == "no-store"
+        assert "/static/app.js?v=" in page.text
+        assert "/static/style.css?v=" in page.text
+        script_url = page.text.split('src="')[1].split('"')[0]
+        assert client.get(script_url).status_code == 200
+
+
 def test_direct_access_keeps_real_data_and_controls_available_without_token(processed):
     processed.settings.auth_required = False
     with TestClient(create_app(processed.settings, processed)) as client:
