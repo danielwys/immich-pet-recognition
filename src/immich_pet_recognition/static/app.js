@@ -230,11 +230,18 @@ function chosenItems() {
 }
 function updateSelection() {
   const chosen = chosenItems();
+  const allShownSelected =
+    visibleItems.length > 0 && chosen.length === visibleItems.length;
   document
     .querySelector(".batch-bar")
     .classList.toggle("has-selection", chosen.length > 0);
   $("selection-count").textContent = `${chosen.length} selected`;
   $("clear-selection").disabled = busy || !chosen.length;
+  $("clear-selection").classList.toggle("hidden", allShownSelected);
+  $("select-page").textContent = allShownSelected
+    ? "Unselect all"
+    : "Select shown";
+  $("select-page").setAttribute("aria-pressed", String(allShownSelected));
   $("select-page").disabled = busy || !visibleItems.length;
   $("select-strong").disabled =
     busy ||
@@ -689,7 +696,14 @@ $("review-sort").addEventListener("change", () => {
   renderReview().catch((e) => toast(e.message));
 });
 $("select-page").addEventListener("click", () => {
-  visibleItems.forEach((item) => selected.add(item.id));
+  if (
+    visibleItems.length &&
+    visibleItems.every((item) => selected.has(item.id))
+  ) {
+    selected.clear();
+  } else {
+    visibleItems.forEach((item) => selected.add(item.id));
+  }
   updateSelection();
 });
 $("select-strong").addEventListener("click", () => {
