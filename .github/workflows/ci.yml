@@ -16,5 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Simulate a NAS checkout with restrictive permissions
+        run: chmod -R go-rwx src scripts
       - run: docker build -t immich-pet-recognition:test .
+      - name: Check CPU image imports as the service user
+        run: docker run --rm --entrypoint python immich-pet-recognition:test -c "from immich_pet_recognition.api import create_app; from immich_pet_recognition.models import RFDetrDetector, NoodleRecognizer"
       - run: docker build -f Dockerfile.cuda -t immich-pet-recognition:cuda-test .
+      - name: Check CUDA image imports as the service user
+        run: docker run --rm --entrypoint python immich-pet-recognition:cuda-test -c "from immich_pet_recognition.api import create_app; from immich_pet_recognition.models import RFDetrDetector, NoodleRecognizer"
