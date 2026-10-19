@@ -176,7 +176,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         sort: Literal["suggested", "newest"] = "suggested",
         pet_id: UUID | None = None,
         source: Literal["all", "manual", "automatic"] = "all",
-        tagging: Literal["all", "untagged", "tagged"] = "all",
+        tagging: Literal["all", "untagged", "unassigned", "tagged"] = "all",
         include_dismissed: bool = True,
     ):
         clause = (
@@ -196,8 +196,18 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
             "UNION SELECT pp.id,pp.name,pp.tag FROM tag_removals tr "
             "JOIN pets pp ON pp.tag=tr.tag WHERE tr.asset_id=d.asset_id"
         )
-        if tagging != "all":
-            clause += f" AND {'NOT ' if tagging == 'untagged' else ''}EXISTS({photo_tags})"
+        if tagging == "untagged":
+            clause += f" AND NOT EXISTS({photo_tags})"
+        elif tagging == "tagged":
+            # Completed assignments only: a photo's other animals must not leak
+            # suggestions into Tagged -> a named pet.
+            clause += " AND r.status='confirmed'"
+            if not settings.demo:
+                clause += " AND r.published=1"
+        elif tagging == "unassigned":
+            clause += " AND r.published=0"
+            if settings.demo:
+                clause += " AND r.status<>'confirmed'"
         if not include_dismissed:
             clause += (
                 " AND (r.status<>'rejected' OR EXISTS(SELECT 1 FROM tag_removals tr "
@@ -207,11 +217,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
             clause += " AND r.status=?"
             params.append(status)
         if pet_id:
-            clause += (
-                f" AND EXISTS(SELECT 1 FROM ({photo_tags}) pt WHERE pt.pet_id=?)"
-                if tagging == "tagged"
-                else " AND r.pet_id=?"
-            )
+            clause += " AND r.pet_id=?"
             params.append(str(pet_id))
         if source != "all":
             clause += (

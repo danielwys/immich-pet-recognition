@@ -123,11 +123,12 @@ can be retried in **Processing**. Pending removals survive restarts and are veri
 
 Review opens on **Untagged**: photos without any pet tag published by the companion. **Tagged**
 combines manual and automatic tags in one view. A clear badge on each crop shows the existing
-pet tags; a suggested identity is separate. A photo containing several animals is tagged once
-any of its crops has a published pet tag, and the other crops show that photo's existing tags too.
-Queued or failed writes remain untagged until they reach Immich. During reassignment or removal,
-the existing tag stays visible until the change completes. **More filters** contains the optional
-manual/automatic distinction and **Show skipped photos**. The filter reports unique photo counts;
+pet tags. Tagged shows completed assignments only, with correction/removal actions. Selecting a pet
+shows that pet's saved assignments; unassigned animals and suggestions from the same photo are
+excluded. A photo containing several animals is no longer completely untagged once any animal has
+a published pet tag. To work on its remaining animals, open **Untagged → More filters → Include
+untagged animals in already tagged photos**. Queued or failed writes are never shown as completed.
+**More filters** also contains the optional manual/automatic distinction and **Show skipped photos**. The filter reports unique photo counts;
 the paginated cards are detected animal crops.
 
 ## Automatic tagging
@@ -136,8 +137,7 @@ Check performance on a held-out set that is not in the reference gallery. Tune t
 threshold and separation margin to avoid confusing look-alikes. The initial values (0.85/0.08)
 are placeholders, not model-vendor recommendations or proven accuracy guarantees.
 
-Use **Pets & automation → Enable automatic tagging** separately for each pet. Controls also
-appear above the review queue. Changes persist in SQLite without restarting the service.
+Use **Pets & automation → Enable automatic tagging** separately for each pet. Controls are also available in the expandable automation section of the review screen. Changes persist in SQLite without restarting the service.
 Enabling rechecks pending matches in the existing library as well as new photos. **Pause** stops
 future automatic tags and cancels unpublished automatic matches; existing tags and human
 confirmations stay. **Tagged** combines manual and automatic results; **More filters → Tag source** narrows the view when auditing.

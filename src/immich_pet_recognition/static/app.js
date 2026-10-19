@@ -196,6 +196,7 @@ function showPetReview(pet, nextFilter) {
   $("tag-source").value = nextFilter === "automatic" ? "automatic" : "all";
   document.querySelector(".more-filters").open = nextFilter === "automatic";
   $("include-dismissed").checked = false;
+  $("include-partial").checked = false;
   offset = 0;
   selected.clear();
   updateFilterButtons();
@@ -531,7 +532,10 @@ async function renderReview() {
   const request = ++reviewRequest;
   const query = new URLSearchParams({
     status: "all",
-    tagging: filter,
+    tagging:
+      filter === "untagged" && $("include-partial").checked
+        ? "unassigned"
+        : filter,
     include_dismissed: $("include-dismissed").checked,
     offset,
     limit: pageLimit,
@@ -565,8 +569,10 @@ async function renderReview() {
       ? "Demo photos without a simulated pet tag."
       : "Simulated manual and automatic tags. No changes are sent to Immich."
     : filter === "untagged"
-      ? "Photos without a pet tag. A suggestion is not a tag; queued tag changes stay here until they sync."
-      : "Photos with a pet tag already written to Immich, whether assigned manually or automatically. Select photos to correct or remove tags.";
+      ? $("include-partial").checked
+        ? "Unassigned animals from all photos, including photos that already have another pet tagged."
+        : "Photos without a pet tag. A suggestion is not a tag; queued tag changes stay here until they sync."
+      : `${petFilter ? pets.find((pet) => pet.id === petFilter)?.name + "’s completed tags" : "Completed pet tags"} in Immich, manual and automatic together. Use Change tag or Remove tag to make a correction.`;
   $("page-range").textContent = data.total
     ? `${offset + 1}–${Math.min(offset + data.limit, data.total)} of ${data.total.toLocaleString()} animal crops`
     : "No photos here";
@@ -606,7 +612,7 @@ async function renderReview() {
     grid.append(empty);
   }
   visibleItems.forEach((item) => {
-    const rec = item.recommendation;
+    const rec = filter === "tagged" ? null : item.recommendation;
     const card = node("article", "review-card");
     card.dataset.id = item.id;
     const wrap = node("label", "crop-wrap");
@@ -737,16 +743,18 @@ async function renderReview() {
           pet.id !== rec?.pet_id &&
           (item.status !== "confirmed" || pet.id !== item.pet_id),
       );
-      if (compatible.length)
-        options.append(
-          node(
-            "span",
-            "",
-            item.status === "confirmed" ? "Change tag:" : "Tag as:",
-          ),
-        );
+      const choices =
+        item.status === "confirmed"
+          ? node("details", "tag-corrections")
+          : options;
+      if (compatible.length) {
+        if (item.status === "confirmed") {
+          choices.append(node("summary", "", "Change tag"));
+          options.append(choices);
+        } else options.append(node("span", "", "Tag as:"));
+      }
       compatible.forEach((pet) =>
-        options.append(
+        choices.append(
           button(pet.name, "assign-button", () => assign([item], pet)),
         ),
       );
@@ -911,6 +919,11 @@ async function sync(full) {
 }
 function updateFilterButtons() {
   $("tag-source").disabled = filter !== "tagged";
+  $("include-partial").disabled = filter !== "untagged";
+  document.querySelector('#review-sort option[value="suggested"]').hidden =
+    filter === "tagged";
+  if (filter === "tagged" && $("review-sort").value === "suggested")
+    $("review-sort").value = "newest";
   document.querySelectorAll("[data-filter]").forEach((b) => {
     b.classList.toggle("selected", b.dataset.filter === filter);
     b.setAttribute("aria-pressed", String(b.dataset.filter === filter));
@@ -925,6 +938,7 @@ document.querySelectorAll("[data-filter]").forEach((b) =>
   b.addEventListener("click", () => {
     filter = b.dataset.filter;
     $("tag-source").value = "all";
+    $("include-partial").checked = false;
     offset = 0;
     selected.clear();
     updateFilterButtons();
@@ -938,6 +952,11 @@ $("tag-source").addEventListener("change", () => {
   renderReview().catch((e) => toast(e.message));
 });
 $("include-dismissed").addEventListener("change", () => {
+  offset = 0;
+  selected.clear();
+  renderReview().catch((e) => toast(e.message));
+});
+$("include-partial").addEventListener("change", () => {
   offset = 0;
   selected.clear();
   renderReview().catch((e) => toast(e.message));

@@ -1123,6 +1123,15 @@ progress::-webkit-progress-value {
   border-color: var(--accent);
   color: white;
 }
+.tag-corrections summary {
+  cursor: pointer;
+  padding: 7px 0;
+  color: #475569;
+  font-size: 12px;
+}
+.tag-corrections button {
+  margin: 4px 5px 4px 0;
+}
 .filename {
   margin: 8px 0;
 }
