@@ -252,14 +252,103 @@ class Service:
             self.settings.match_margin,
             self.settings.min_references,
         )
-        status = "confirmed" if self.settings.auto_tag and result.confident else "pending"
-        self.store.execute(
-            "INSERT INTO reviews(detection_id,model,pet_id,score,margin,status) "
-            "VALUES (?,?,?,?,?,?) ON CONFLICT(detection_id,model) DO UPDATE SET "
-            "pet_id=excluded.pet_id,score=excluded.score,"
-            "margin=excluded.margin,status=excluded.status",
-            (detection["id"], model, result.pet_id, result.score, result.margin, status),
+        automatic = result.confident and self.automation_enabled(result.pet_id)
+        status = "confirmed" if automatic else "pending"
+        with self.store.connection() as conn:
+            conn.execute(
+                "INSERT INTO reviews(detection_id,model,pet_id,score,margin,status) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(detection_id,model) DO UPDATE SET "
+                "pet_id=excluded.pet_id,score=excluded.score,"
+                "margin=excluded.margin,status=excluded.status",
+                (detection["id"], model, result.pet_id, result.score, result.margin, status),
+            )
+            if automatic:
+                conn.execute(
+                    "INSERT OR IGNORE INTO automatic_reviews VALUES (?,?)",
+                    (detection["id"], model),
+                )
+
+    def automation_enabled(self, pet_id):
+        if not pet_id:
+            return False
+        row = self.store.one("SELECT enabled FROM pet_automation WHERE pet_id=?", (pet_id,))
+        return bool(row["enabled"]) if row else self.settings.auto_tag
+
+    def pets(self):
+        pets = self.store.rows(
+            "SELECT p.*,count(CASE WHEN r.kind='positive' THEN 1 END) positive_count,"
+            "count(CASE WHEN r.kind='negative' THEN 1 END) negative_count FROM pets p "
+            "LEFT JOIN reference_images r ON p.id=r.pet_id GROUP BY p.id ORDER BY p.name"
         )
+        counts = {
+            row["pet_id"]: row
+            for row in self.store.rows(
+                "SELECT r.pet_id,"
+                "sum(r.status='pending') pending_count,"
+                "sum(r.status='pending' AND r.score>=? AND r.margin>=?) strong_count,"
+                "sum(r.status='confirmed' AND r.published=1) tagged_count,"
+                "sum(r.status='confirmed' AND r.published=0) queued_count,"
+                "sum(r.status='confirmed' AND r.published=1 AND ar.detection_id IS NOT NULL) "
+                "auto_tagged_count FROM reviews r JOIN detections d ON d.id=r.detection_id "
+                "JOIN assets a ON a.id=d.asset_id LEFT JOIN automatic_reviews ar "
+                "ON ar.detection_id=r.detection_id AND ar.model=r.model "
+                "WHERE r.model=? AND d.detector=? AND d.revision=a.revision GROUP BY r.pet_id",
+                (
+                    self.settings.match_threshold,
+                    self.settings.match_margin,
+                    self.settings.recognizer_key,
+                    self.settings.detector_key,
+                ),
+            )
+        }
+        for pet in pets:
+            pet.update(
+                {
+                    key: counts.get(pet["id"], {}).get(key, 0)
+                    for key in (
+                        "pending_count",
+                        "strong_count",
+                        "tagged_count",
+                        "queued_count",
+                        "auto_tagged_count",
+                    )
+                }
+            )
+            pet["auto_tag"] = self.automation_enabled(pet["id"])
+            pet["example_gate_met"] = pet["positive_count"] >= self.settings.min_references
+            if not pet["example_gate_met"]:
+                pet["strong_count"] = 0
+        return pets
+
+    def set_automation(self, pet_id, enabled):
+        with self.model_lock:
+            if not self.store.one("SELECT id FROM pets WHERE id=?", (pet_id,)):
+                raise ValueError("Pet not found")
+            with self.store.connection() as conn:
+                conn.execute(
+                    "INSERT INTO pet_automation VALUES (?,?) ON CONFLICT(pet_id) "
+                    "DO UPDATE SET enabled=excluded.enabled",
+                    (pet_id, int(enabled)),
+                )
+                if not enabled:
+                    # Pause also cancels automatic writes that have not reached Immich.
+                    conn.execute(
+                        "UPDATE reviews SET status='pending',error=NULL WHERE pet_id=? "
+                        "AND published=0 AND status='confirmed' AND model=? "
+                        "AND EXISTS (SELECT 1 FROM automatic_reviews ar WHERE "
+                        "ar.detection_id=reviews.detection_id AND ar.model=reviews.model)",
+                        (pet_id, self.settings.recognizer_key),
+                    )
+                    conn.execute(
+                        "DELETE FROM automatic_reviews WHERE EXISTS (SELECT 1 FROM reviews r "
+                        "WHERE r.detection_id=automatic_reviews.detection_id "
+                        "AND r.model=automatic_reviews.model AND r.pet_id=? "
+                        "AND r.status='pending')",
+                        (pet_id,),
+                    )
+            # Persisted revision makes an interrupted backlog recheck resume on restart.
+            self.gallery_changed()
+        return next(pet for pet in self.pets() if pet["id"] == pet_id)
 
     def rematch(self):
         with self.model_lock:
@@ -400,6 +489,10 @@ class Service:
             changed = row["pet_id"] != pet_id or row["status"] != status
             gallery_updated = False
             with self.store.connection() as conn:
+                conn.execute(
+                    "DELETE FROM automatic_reviews WHERE detection_id=? AND model=?",
+                    (detection_id, self.settings.recognizer_key),
+                )
                 conn.execute(
                     "UPDATE reviews SET pet_id=?,status=?,published=?,error=NULL "
                     "WHERE detection_id=? AND model=?",
@@ -593,7 +686,7 @@ class Service:
         return {
             "demo": self.settings.demo,
             "auth_required": self.settings.auth_required and not self.settings.demo,
-            "auto_tag": self.settings.auto_tag,
+            "auto_tag": any(pet["auto_tag"] for pet in self.pets()),
             "provider": self.settings.provider,
             "detector": self.settings.detector_repo,
             "recognizer": self.settings.recognizer_repo,

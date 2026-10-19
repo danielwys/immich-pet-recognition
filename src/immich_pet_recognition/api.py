@@ -36,6 +36,10 @@ class ReferenceCreate(BaseModel):
     kind: Literal["positive", "negative"] = "positive"
 
 
+class AutomationUpdate(BaseModel):
+    enabled: bool
+
+
 class Decision(BaseModel):
     status: Literal["confirmed", "rejected"]
     pet_id: UUID | None = None
@@ -123,11 +127,14 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
 
     @app.get("/api/pets", dependencies=auth)
     def pets():
-        return service.store.rows(
-            "SELECT p.*,count(CASE WHEN r.kind='positive' THEN 1 END) positive_count,"
-            "count(CASE WHEN r.kind='negative' THEN 1 END) negative_count FROM pets p "
-            "LEFT JOIN reference_images r ON p.id=r.pet_id GROUP BY p.id ORDER BY p.name"
-        )
+        return service.pets()
+
+    @app.put("/api/pets/{pet_id}/automation", dependencies=auth)
+    def set_automation(pet_id: UUID, body: AutomationUpdate):
+        try:
+            return service.set_automation(str(pet_id), body.enabled)
+        except ValueError as error:
+            raise HTTPException(404, str(error)) from None
 
     @app.post("/api/pets", dependencies=auth, status_code=201)
     def add_pet(body: PetCreate):
@@ -167,6 +174,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         limit: int = Query(default=48, ge=1, le=100),
         sort: Literal["suggested", "newest"] = "suggested",
         pet_id: UUID | None = None,
+        source: Literal["all", "automatic"] = "all",
     ):
         clause = (
             "FROM detections d JOIN assets a ON a.id=d.asset_id "
@@ -180,10 +188,17 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         if pet_id:
             clause += " AND r.pet_id=?"
             params.append(str(pet_id))
+        if source == "automatic":
+            clause += (
+                " AND EXISTS(SELECT 1 FROM automatic_reviews ar "
+                "WHERE ar.detection_id=r.detection_id AND ar.model=r.model)"
+            )
         count = service.store.one("SELECT count(*) total " + clause, params)["total"]
         rows = service.store.rows(
             "SELECT d.id,d.asset_id,d.species,d.score detector_score,d.box,a.name,"
-            "r.pet_id,r.score,r.margin,r.status,r.published,r.error,p.name pet_name "
+            "r.pet_id,r.score,r.margin,r.status,r.published,r.error,p.name pet_name,"
+            "EXISTS(SELECT 1 FROM automatic_reviews ar WHERE ar.detection_id=r.detection_id "
+            "AND ar.model=r.model) automatic "
             + clause
             + (
                 " ORDER BY r.score DESC,d.rowid DESC"

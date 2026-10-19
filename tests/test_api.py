@@ -352,3 +352,44 @@ def test_stale_assignment_precondition_prevents_overwriting_another_correction(p
         assert result["saved"] == 0
         assert result["failed"] == 1
         assert processed.store.one("SELECT pet_id FROM reviews")["pet_id"] == rusty["id"]
+
+
+def test_automation_controls_and_audit_filter(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    pet = processed.add_pet("Mochi", "dog")
+    processed.settings.min_references = 1
+    processed.add_reference(pet["id"], detection, "positive")
+    with TestClient(create_app(processed.settings, processed)) as client:
+        path = f"/api/pets/{pet['id']}/automation"
+        assert client.put(path, json={"enabled": True}).status_code == 401
+        assert (
+            client.put(
+                f"/api/pets/{uuid4()}/automation", json={"enabled": True}, headers=AUTH
+            ).status_code
+            == 404
+        )
+        response = client.put(path, json={"enabled": True}, headers=AUTH)
+        assert response.status_code == 200
+        assert response.json()["auto_tag"] is True
+        assert client.get("/api/status", headers=AUTH).json()["auto_tag"] is True
+        processed.rematch()
+        processed.publish_one()
+        auto = client.get("/api/detections?status=confirmed&source=automatic", headers=AUTH).json()
+        assert auto["total"] == 1
+        assert auto["items"][0]["automatic"] == 1
+        assert client.get("/api/pets", headers=AUTH).json()[0]["auto_tagged_count"] == 1
+        client.put(path, json={"enabled": False}, headers=AUTH)
+        assert client.get("/api/status", headers=AUTH).json()["auto_tag"] is False
+        assert (
+            client.get("/api/detections?status=confirmed&source=automatic", headers=AUTH).json()[
+                "total"
+            ]
+            == 1
+        )
+        processed.settings.auth_required = False
+        assert (
+            client.put(
+                path, json={"enabled": True}, headers={"Origin": "https://other.example"}
+            ).status_code
+            == 403
+        )

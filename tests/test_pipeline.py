@@ -334,3 +334,104 @@ def test_reversing_a_partly_published_correction_keeps_only_final_identity(proce
     processed.publish_one()
     assert processed.immich.assigned_tags[processed.immich.items[0]["id"]] == {"Pets/Butter"}
     assert processed.store.one("SELECT count(*) n FROM tag_removals")["n"] == 0
+
+
+def test_automation_is_per_pet_and_never_teaches_itself(processed):
+    from uuid import uuid4
+
+    processed.settings.min_references = 1
+    first = processed.store.one("SELECT * FROM detections")
+    mochi = processed.add_pet("Mochi", "dog")
+    milo = processed.add_pet("Milo", "dog")
+    processed.add_reference(mochi["id"], first["id"], "positive")
+    asset = {**processed.immich.items[0], "id": str(uuid4())}
+    processed.immich.items.append(asset)
+    processed.sync()
+    processed.process_one()
+    second = processed.store.one("SELECT * FROM detections WHERE asset_id=?", (asset["id"],))
+    processed.store.save_embedding(
+        second["id"], processed.settings.recognizer_key, np.array([0, 1, 0], dtype=np.float32)
+    )
+    processed.add_reference(milo["id"], second["id"], "positive")
+    processed.set_automation(mochi["id"], True)
+    processed.rematch()
+    reviews = {r["detection_id"]: r for r in processed.store.rows("SELECT * FROM reviews")}
+    assert reviews[first["id"]]["status"] == "confirmed"
+    assert reviews[second["id"]]["status"] == "pending"
+    assert processed.store.rows("SELECT detection_id FROM automatic_reviews") == [
+        {"detection_id": first["id"]}
+    ]
+    assert processed.store.one("SELECT count(*) n FROM reference_images")["n"] == 2
+    assert processed.publish_one()
+    assert processed.immich.tag_calls == [(first["asset_id"], "Pets/Mochi")]
+    pet = next(p for p in processed.pets() if p["id"] == mochi["id"])
+    assert pet["auto_tagged_count"] == 1
+    assert pet["tagged_count"] == 1
+
+
+@pytest.mark.parametrize("gate", ["examples", "similarity", "margin"])
+def test_per_pet_automation_respects_every_gate(processed, gate):
+    detection = processed.store.one("SELECT * FROM detections")
+    pet = processed.add_pet("Mochi", "dog")
+    processed.add_reference(pet["id"], detection["id"], "positive")
+    processed.settings.min_references = 2 if gate == "examples" else 1
+    if gate == "similarity":
+        processed.store.save_embedding(
+            detection["id"],
+            processed.settings.recognizer_key,
+            np.array([0.6, 0.8, 0], dtype=np.float32),
+        )
+        # A separate held-out vector avoids comparing the reference with itself.
+        processed.references = lambda: [{**pet, "positive": [np.array([1, 0, 0])], "negative": []}]
+    if gate == "margin":
+        rival = processed.add_pet("Milo", "dog")
+        processed.add_reference(rival["id"], detection["id"], "positive")
+    processed.set_automation(pet["id"], True)
+    processed.rematch()
+    assert processed.store.one("SELECT status FROM reviews")["status"] == "pending"
+    assert not processed.publish_one()
+
+
+def test_pause_cancels_only_unpublished_automatic_work_and_survives_restart(processed):
+    processed.settings.min_references = 1
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    pet = processed.add_pet("Mochi", "dog")
+    processed.add_reference(pet["id"], detection, "positive")
+    processed.set_automation(pet["id"], True)
+    processed.rematch()
+    assert processed.store.one("SELECT status FROM reviews")["status"] == "confirmed"
+    processed.set_automation(pet["id"], False)
+    assert processed.store.one("SELECT status FROM reviews")["status"] == "pending"
+    assert not processed.publish_one()
+    processed.settings.auto_tag = True  # A saved choice overrides the deployment default.
+    restarted = Service(
+        processed.settings, processed.immich, processed.detector, processed.recognizer
+    )
+    assert not restarted.automation_enabled(pet["id"])
+    assert restarted.suggestions_pending()
+    restarted.rematch()
+    assert restarted.store.one("SELECT status FROM reviews")["status"] == "pending"
+    restarted.decide(detection, pet["id"], "confirmed")
+    restarted.set_automation(pet["id"], False)
+    assert restarted.publish_one()  # Human confirmation is not cancelled by pause.
+    assert restarted.store.rows("SELECT * FROM automatic_reviews") == []
+
+
+def test_pause_keeps_published_automatic_tags_and_human_correction_clears_source(processed):
+    processed.settings.min_references = 1
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    pet = processed.add_pet("Mochi", "dog")
+    processed.add_reference(pet["id"], detection, "positive")
+    processed.set_automation(pet["id"], True)
+    processed.rematch()
+    processed.publish_one()
+    processed.set_automation(pet["id"], False)
+    assert processed.store.one("SELECT status,published FROM reviews") == {
+        "status": "confirmed",
+        "published": 1,
+    }
+    assert processed.pets()[0]["auto_tagged_count"] == 1
+    processed.decide(detection, pet["id"], "confirmed", learn=True)
+    assert processed.store.rows("SELECT * FROM automatic_reviews") == []
+    assert processed.pets()[0]["auto_tagged_count"] == 0
+    assert processed.pets()[0]["positive_count"] == 1

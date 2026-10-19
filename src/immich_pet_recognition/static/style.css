@@ -509,6 +509,9 @@ input {
   grid-template-columns: repeat(2, 1fr);
   gap: 18px;
 }
+.pet-grid {
+  grid-template-columns: repeat(auto-fit, minmax(285px, 1fr));
+}
 .pet-card,
 .setup-card {
   background: var(--surface);
@@ -846,7 +849,8 @@ h1 {
 }
 .learning-heading {
   display: flex;
-  align-items: center;
+  align-items: start;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
 }
@@ -1095,6 +1099,35 @@ progress::-webkit-progress-value {
 .pet-card .learning-card {
   margin: 18px 0 12px;
   padding: 12px;
+}
+.automation-mode {
+  display: block;
+  font-size: 12px;
+  margin: 8px 0;
+  color: #475569;
+}
+.automation-mode.is-on {
+  color: #1d4ed8;
+}
+.learning-card .primary,
+.learning-card .secondary {
+  width: 100%;
+  margin-top: 4px;
+}
+.learning-card .next-step,
+.review-explanation {
+  line-height: 1.5;
+  font-size: 12px;
+}
+.automation-rules {
+  border-left: 3px solid var(--accent);
+  background: var(--pale);
+  padding: 16px 20px;
+  line-height: 1.6;
+  margin: 20px 0;
+}
+.automation-rules p {
+  margin: 6px 0 0;
 }
 @media (min-width: 1500px) {
   .review-grid {

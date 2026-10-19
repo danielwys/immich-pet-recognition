@@ -20,8 +20,8 @@ const titles = {
     "Select photos, assign them together, and improve the next suggestions.",
   ],
   pets: [
-    "Your pets. Their progress.",
-    "See how many examples each pet has and what comes next.",
+    "Teach. Automate. Check.",
+    "Each pet has its own automatic tagging control. Uncertain matches always wait for review.",
   ],
   processing: [
     "Library processing.",
@@ -95,7 +95,7 @@ function progressCard(pet) {
   const heading = node("div", "learning-heading");
   heading.append(
     node("strong", "", pet.name),
-    node("span", "", `${count} / ${required} examples`),
+    node("span", "", `${count} examples · ${required} minimum`),
   );
   const progress = node("progress");
   progress.max = required;
@@ -108,11 +108,96 @@ function progressCard(pet) {
       "p",
       "",
       count < required
-        ? `${required - count} more to clear the example gate. Suggestions start with the first example.`
-        : "Example gate met. Check accuracy on separate photos before enabling automatic tagging.",
+        ? `Add ${required - count} more examples to reach the minimum for automatic tagging.`
+        : "Example minimum reached. Each new match must also pass the similarity and look-alike checks.",
+    ),
+  );
+  const mode = node(
+    "strong",
+    "automation-mode" + (pet.auto_tag ? " is-on" : ""),
+    pet.auto_tag
+      ? "Automatic tagging ON"
+      : "Review only · automatic tagging OFF",
+  );
+  card.append(mode);
+  card.append(
+    node(
+      "p",
+      "automation-summary",
+      `${pet.auto_tagged_count.toLocaleString()} automatically tagged · ${pet.pending_count.toLocaleString()} to review`,
+    ),
+  );
+  card.append(
+    node(
+      "p",
+      "",
+      status.suggestions_updating
+        ? "Rechecking the queue with your latest examples and settings…"
+        : `${pet.strong_count.toLocaleString()} waiting matches pass all three checks${pet.auto_tag ? "." : " · enable to tag them."}`,
+    ),
+  );
+  if (pet.queued_count)
+    card.append(
+      node("p", "", `${pet.queued_count} tags waiting to sync to Immich.`),
+    );
+  const control = button(
+    pet.auto_tag ? "Pause automatic tagging" : "Enable automatic tagging",
+    pet.auto_tag ? "secondary" : "primary",
+    () => setAutomation(pet),
+    busy || (!pet.auto_tag && count < required),
+  );
+  control.setAttribute(
+    "aria-label",
+    `${pet.auto_tag ? "Pause" : "Enable"} automatic tagging for ${pet.name}`,
+  );
+  card.append(control);
+  card.append(
+    node(
+      "p",
+      "next-step",
+      pet.auto_tag
+        ? "Checks the existing queue and new photos. Pause stops future automatic tags; existing tags stay."
+        : count < required
+          ? "Next: assign clear photos to this pet with “Use my assignments as examples” checked."
+          : `Next: enable to tag strong matches in the existing queue and new photos as ${pet.tag}.`,
     ),
   );
   return card;
+}
+function automationSummary() {
+  const names = pets.filter((pet) => pet.auto_tag).map((pet) => pet.name);
+  return names.length
+    ? `Automatic tagging on for ${names.join(" and ")}`
+    : "Automatic tagging off for all pets";
+}
+async function setAutomation(pet) {
+  if (busy) return;
+  busy = true;
+  renderLearning();
+  if (panel === "pets") renderPets();
+  try {
+    await api(`pets/${pet.id}/automation`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: !pet.auto_tag }),
+    });
+    toast(
+      pet.auto_tag
+        ? `${pet.name}: automatic tagging paused. Existing tags stay.`
+        : `${pet.name}: automatic tagging enabled. Rechecking the existing queue.`,
+    );
+  } finally {
+    busy = false;
+    await refresh();
+  }
+}
+function showPetReview(pet, nextFilter) {
+  petFilter = pet?.id || "";
+  filter = nextFilter;
+  offset = 0;
+  selected.clear();
+  updateFilterButtons();
+  renderPetFilters();
+  switchPanel("review");
 }
 function renderLearning() {
   const grid = $("learning-progress");
@@ -137,7 +222,7 @@ function renderLearning() {
       ? "Suggestions use your example galleries. Assignments can teach the next batch."
       : "No examples yet. Confirmations from the old interface were not used for matching.";
   $("match-guide-text").textContent =
-    `All three gates must pass: ${status.min_references} examples for that pet, similarity at least ${status.match_threshold.toFixed(2)}, and a lead of at least ${status.match_margin.toFixed(2)} over the next pet or a negative example. Automatic tagging is ${status.auto_tag ? "on" : "off — even strong suggestions wait for your approval"}.`;
+    `A match must pass all three checks: ${status.min_references} examples for that pet, similarity ≥ ${status.match_threshold.toFixed(2)}, and a lead ≥ ${status.match_margin.toFixed(2)} over look-alikes. Enable automatic tagging separately for each pet above. Matches below either score stay in To review. Human assignments teach the gallery; automatic tags never do.`;
   $("match-guide-summary").textContent =
     `Strong suggestion: ${status.min_references} examples · similarity ≥ ${status.match_threshold.toFixed(2)} · lead ≥ ${status.match_margin.toFixed(2)}. How it works`;
 }
@@ -170,9 +255,7 @@ async function refresh() {
     $("last-sync").textContent = status.last_sync
       ? "Last sync · " + new Date(status.last_sync).toLocaleString()
       : "Waiting for first sync";
-    $("tagging-state").textContent = status.auto_tag
-      ? "Automatic tagging on"
-      : "Automatic tagging off · Review required";
+    $("tagging-state").textContent = automationSummary();
     renderLearning();
     renderPetFilters();
     updateSelection();
@@ -409,11 +492,12 @@ function renderGates(recommendation) {
 async function renderReview() {
   const request = ++reviewRequest;
   const query = new URLSearchParams({
-    status: filter,
+    status: filter === "automatic" ? "confirmed" : filter,
     offset,
     limit: pageLimit,
     sort: $("review-sort").value,
   });
+  if (filter === "automatic") query.set("source", "automatic");
   if (petFilter) query.set("pet_id", petFilter);
   const data = await api("detections?" + query);
   if (panel !== "review" || request !== reviewRequest) return;
@@ -446,14 +530,20 @@ async function renderReview() {
       node(
         "h2",
         "",
-        petFilter ? "No matches for this pet yet." : "No photos waiting here.",
+        filter === "automatic"
+          ? "No automatic tags yet."
+          : petFilter
+            ? "No matches for this pet yet."
+            : "No photos waiting here.",
       ),
       node(
         "p",
         "",
-        petFilter
-          ? "Switch to All pets to choose examples. Suggestions appear after examples are added and matching catches up."
-          : "New detections appear after the library scan. You can also turn existing confirmed photos into examples.",
+        filter === "automatic"
+          ? "When automatic tagging is on, matches appear here after passing all three checks. Weaker matches stay in To review."
+          : petFilter
+            ? "Switch to All pets to choose examples. Suggestions appear after examples are added and matching catches up."
+            : "New detections appear after the library scan. You can also turn existing confirmed photos into examples.",
       ),
       button(
         pets.length ? "Show all pets" : "Register your pet",
@@ -526,7 +616,24 @@ async function renderReview() {
         ),
       );
     content.append(line, node("p", "filename", item.name));
-    if (rec) content.append(renderGates(rec));
+    if (rec) {
+      const mode = pets.find((pet) => pet.id === rec.pet_id);
+      const missed = rec.gates
+        .filter((gate) => !gate.passed)
+        .map((gate) => gate.label.toLowerCase());
+      content.append(
+        node(
+          "p",
+          "review-explanation",
+          rec.confident
+            ? mode?.auto_tag
+              ? "Passes all checks. Waiting for the automatic tagging recheck."
+              : `Passes all checks. Automatic tagging is off for ${rec.pet_name}.`
+            : `Needs review: ${missed.join(" and ")} below the minimum.`,
+        ),
+      );
+      content.append(renderGates(rec));
+    }
     {
       const actions = node("div", "card-actions");
       if (rec) {
@@ -575,7 +682,9 @@ async function renderReview() {
           "p",
           "review-state",
           item.published
-            ? "✓ Tagged in Immich"
+            ? item.automatic
+              ? "✓ Automatically tagged in Immich"
+              : "✓ Tagged in Immich · human confirmed"
             : status.demo
               ? "Confirmed in demo"
               : "Tag writeback queued",
@@ -597,6 +706,8 @@ async function renderReview() {
 function renderPets() {
   const grid = $("pet-grid");
   grid.replaceChildren();
+  $("automation-thresholds").textContent =
+    `Current checks: ${status.min_references}+ examples · similarity ≥ ${status.match_threshold.toFixed(2)} · lead over look-alikes ≥ ${status.match_margin.toFixed(2)}. These are score cutoffs, not an accuracy percentage.`;
   pets.forEach((pet) => {
     const card = node("article", "pet-card");
     card.append(
@@ -606,6 +717,17 @@ function renderPets() {
     );
     card.append(
       node("p", "", `${pet.negative_count} look-alike examples excluded`),
+      node(
+        "p",
+        "",
+        `${pet.tagged_count.toLocaleString()} matches tagged in Immich · ${pet.strong_count.toLocaleString()} strong matches waiting${status.suggestions_updating ? " (rechecking…)" : ""}`,
+      ),
+      button("Review automatic tags →", "secondary", () =>
+        showPetReview(pet, "automatic"),
+      ),
+      button("Review uncertain matches →", "quiet", () =>
+        showPetReview(pet, "pending"),
+      ),
     );
     card.append(
       button("Choose example photos →", "quiet", () => {
@@ -669,7 +791,10 @@ function renderSetup() {
           ? "Immich connected"
           : "Awaiting a successful Immich sync",
     ],
-    ["Automatic tagging", status.auto_tag ? "On" : "Off · review required"],
+    [
+      "Automatic tagging",
+      automationSummary() + " · change on Pets & automation",
+    ],
     [
       "Access",
       status.auth_required

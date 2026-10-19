@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS reviews (
  error TEXT, PRIMARY KEY(detection_id, model)
 );
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pet_automation (
+ pet_id TEXT PRIMARY KEY REFERENCES pets(id), enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
+);
+CREATE TABLE IF NOT EXISTS automatic_reviews (
+ detection_id TEXT NOT NULL, model TEXT NOT NULL,
+ PRIMARY KEY(detection_id, model),
+ FOREIGN KEY(detection_id, model) REFERENCES reviews(detection_id, model)
+);
 CREATE TABLE IF NOT EXISTS tag_removals (
  detection_id TEXT NOT NULL, model TEXT NOT NULL, asset_id TEXT NOT NULL, tag TEXT NOT NULL,
  PRIMARY KEY(detection_id, model, tag),

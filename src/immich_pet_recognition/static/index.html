@@ -19,7 +19,7 @@
           <span>Review queue</span
           ><span id="nav-count" class="nav-count">0</span>
         </button>
-        <button class="nav" data-panel="pets">Pet gallery</button>
+        <button class="nav" data-panel="pets">Pets &amp; automation</button>
         <button class="nav" data-panel="processing">Processing</button>
         <button class="nav" data-panel="setup">Setup &amp; connection</button>
       </nav>
@@ -63,11 +63,11 @@
       <section class="stats" aria-label="Library status">
         <div>
           <span>Waiting for review</span><strong id="stat-pending">—</strong
-          ><small>Your eye makes the difference</small>
+          ><small>Below the checks, or automation off</small>
         </div>
         <div>
           <span>Confirmed matches</span><strong id="stat-confirmed">—</strong
-          ><small>Ready to find in Immich</small>
+          ><small>Human confirmed + automatic matches</small>
         </div>
         <div>
           <span>Photos in queue</span><strong id="stat-queued">—</strong
@@ -81,7 +81,7 @@
       <section id="review-panel" class="panel">
         <div class="section-heading">
           <div>
-            <h2>Teach a few. Review in batches.</h2>
+            <h2>Teach, automate, and review.</h2>
             <p id="suggestion-state" role="status">
               Checking your example galleries…
             </p>
@@ -106,6 +106,8 @@
               To review</button
             ><button data-filter="confirmed" aria-pressed="false">
               Confirmed</button
+            ><button data-filter="automatic" aria-pressed="false">
+              Automatically tagged</button
             ><button data-filter="rejected" aria-pressed="false">
               Dismissed</button
             ><button data-filter="all" aria-pressed="false">All</button>
@@ -177,11 +179,26 @@
       <section id="pets-panel" class="panel hidden">
         <div class="section-heading">
           <div>
-            <h2>Your family, one pet at a time.</h2>
+            <h2>Automatic tagging, per pet.</h2>
             <p>
-              Register a pet, then add reference crops from the review queue.
+              1. Teach with clear examples. 2. Enable automatic tagging. 3.
+              Check automatic tags and review uncertain matches.
             </p>
           </div>
+        </div>
+        <div id="pet-grid" class="pet-grid"></div>
+        <div class="automation-rules">
+          <strong>What happens when you enable it?</strong>
+          <p>
+            The service rechecks the existing review queue and keeps checking
+            new photos. It writes a pet tag in Immich only when all three checks
+            pass. Each pet’s control is saved across restarts.
+          </p>
+          <p id="automation-thresholds"></p>
+          <p>
+            <strong>Made a mistake?</strong> Open Confirmed or Automatically
+            tagged, select photos, then choose the correct pet or Remove tags.
+          </p>
         </div>
         <form id="pet-form" class="form-row">
           <label
@@ -198,7 +215,6 @@
             </select></label
           ><button class="primary" type="submit">Register pet</button>
         </form>
-        <div id="pet-grid" class="pet-grid"></div>
         <div class="tip">
           <p>
             <strong>A good first gallery: 30–50 photos.</strong> Include

@@ -125,8 +125,16 @@ Check performance on a held-out set that is not in the reference gallery. Tune t
 threshold and separation margin to avoid confusing look-alikes. The initial values (0.85/0.08)
 are placeholders, not model-vendor recommendations or proven accuracy guarantees.
 
-Set `PET_AUTO_TAG=true` only after calibration and restart the service. A match must clear both
-thresholds and have at least `PET_MIN_REFERENCES` positive references. Explicitly rejected or
+Use **Pets & automation → Enable automatic tagging** separately for each pet. Controls also
+appear above the review queue. Changes persist in SQLite without restarting the service.
+Enabling rechecks pending matches in the existing library as well as new photos. **Pause** stops
+future automatic tags and cancels unpublished automatic matches; existing tags and human
+confirmations stay. **Automatically tagged** lets you audit and correct automatic assignments.
+The per-pet cards show example counts, automatic tags, and matches still waiting for review.
+
+A match must clear both thresholds and have at least `PET_MIN_REFERENCES` positive references.
+`PET_AUTO_TAG` remains the default for pets without a saved UI choice (false by default);
+an explicit per-pet choice takes precedence. Explicitly rejected or
 confirmed decisions survive rematching. Confirmed tags are additive; the service never removes
 unrelated tags. Published assignments can be corrected or removed from the review UI. Only explicit human assignments
 with the examples option enabled, or an explicit example action, change the reference gallery.
