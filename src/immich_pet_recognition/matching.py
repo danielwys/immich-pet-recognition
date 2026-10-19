@@ -12,7 +12,9 @@ class Match:
     confident: bool
 
 
-def match_pet(vector, species, references, threshold, margin, min_references) -> Match:
+def match_pet(
+    vector, species, references, threshold, margin, min_references, policies=None
+) -> Match:
     """Compare top-three positive mean to rivals/negatives. Scores aren't probabilities."""
     candidates = []
     for pet in references:
@@ -28,5 +30,12 @@ def match_pet(vector, species, references, threshold, margin, min_references) ->
     score, pet_id, negative, count = candidates[0]
     rival = candidates[1][0] if len(candidates) > 1 else -1.0
     gap = score - max(rival, negative)
+    if policies and pet_id in policies:
+        policy = policies[pet_id]
+        threshold, margin, min_references = (
+            policy["threshold"],
+            policy["margin"],
+            policy["min_references"],
+        )
     confident = score >= threshold and gap >= margin and count >= min_references
     return Match(pet_id, score, gap, count, confident)

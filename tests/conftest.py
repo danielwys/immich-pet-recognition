@@ -95,6 +95,7 @@ def settings(tmp_path):
         service_token="test-token",
         immich_api_key="test-api-key",
         background=False,
+        matching_mode="fixed",
     )
 
 

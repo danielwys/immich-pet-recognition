@@ -7,10 +7,12 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
 from PIL import Image, ImageOps
 
 from .config import Settings
 from .immich import ImmichClient, ImmichError, asset_revision
+from .learning import PROFILES, fit_policies
 from .matching import match_pet
 from .models import NoodleRecognizer, RFDetrDetector
 from .store import Store
@@ -53,6 +55,9 @@ class Service:
         self.model_lock = threading.RLock()
         self.recheck_lock = threading.Lock()
         self.recheck = json.loads(self.store.state("last_recheck", "{}"))
+        self.policy_lock = threading.RLock()
+        self.policy_cache = None
+        self.group_cache = None
 
     def start(self):
         self.store.execute("UPDATE jobs SET status='queued' WHERE status='processing'")
@@ -223,21 +228,108 @@ class Service:
         gallery = []
         for pet in self.store.rows("SELECT * FROM pets ORDER BY name"):
             pet["positive"], pet["negative"] = [], []
+            for kind in ("positive", "negative"):
+                pet[kind + "_ids"], pet[kind + "_assets"] = [], []
             for reference in self.store.rows(
-                "SELECT d.*,r.kind FROM reference_images r "
+                "SELECT d.*,r.kind,e.vector FROM reference_images r "
                 "JOIN detections d ON d.id=r.detection_id "
-                "WHERE r.pet_id=?",
-                (pet["id"],),
+                "LEFT JOIN embeddings e ON e.detection_id=d.id AND e.model=? "
+                "WHERE r.pet_id=? ORDER BY d.id",
+                (self.settings.recognizer_key, pet["id"]),
             ):
-                vector = (
-                    self.store.embedding(reference["id"], self.settings.recognizer_key)
-                    if cached_only
-                    else self.embed(reference)
-                )
+                if reference["vector"] is not None:
+                    vector = np.frombuffer(reference["vector"], dtype=np.float32).copy()
+                else:
+                    vector = None if cached_only else self.embed(reference)
                 if vector is not None:
                     pet[reference["kind"]].append(vector)
+                    pet[reference["kind"] + "_ids"].append(reference["id"])
+                    pet[reference["kind"] + "_assets"].append(reference["asset_id"])
             gallery.append(pet)
         return gallery
+
+    def matching_options(self):
+        return json.loads(
+            self.store.state(
+                "matching_options",
+                json.dumps({"mode": self.settings.matching_mode, "profile": "balanced"}),
+            )
+        )
+
+    def policies(self, gallery=None, mode=None, profile=None):
+        options = self.matching_options()
+        mode, profile = mode or options["mode"], profile or options["profile"]
+        key = (
+            self.store.state("gallery_revision", "0"),
+            self.settings.recognizer_key,
+            mode,
+            profile,
+            self.settings.match_threshold,
+            self.settings.match_margin,
+            self.settings.min_references,
+        )
+        with self.policy_lock:
+            if self.policy_cache and self.policy_cache[0] == key:
+                return self.policy_cache[1]
+            if mode == "adaptive":
+                gallery = self.references(cached_only=True) if gallery is None else gallery
+                policies = fit_policies(
+                    gallery,
+                    self.settings.match_threshold,
+                    self.settings.match_margin,
+                    self.settings.min_references,
+                    profile,
+                )
+            else:
+                gallery = self.store.rows("SELECT id FROM pets") if gallery is None else gallery
+                policies = {
+                    pet["id"]: {
+                        "threshold": self.settings.match_threshold,
+                        "margin": self.settings.match_margin,
+                        "min_references": self.settings.min_references,
+                        "state": "fixed",
+                    }
+                    for pet in gallery
+                }
+            self.policy_cache = (key, policies)
+            return policies
+
+    def matching_preview(self, mode=None, profile=None):
+        options = self.matching_options()
+        mode, profile = mode or options["mode"], profile or options["profile"]
+        policies = self.policies(mode=mode, profile=profile)
+        rows = self.store.rows(
+            "SELECT p.id,p.name,count(d.id) eligible_crops,"
+            "count(DISTINCT d.asset_id) eligible_photos FROM pets p "
+            "LEFT JOIN json_each(?) rule ON rule.key=p.id "
+            "LEFT JOIN reviews r ON r.pet_id=p.id AND r.model=? AND r.status='pending' "
+            "AND r.score>=json_extract(rule.value,'$.threshold') "
+            "AND r.margin>=json_extract(rule.value,'$.margin') "
+            "AND (SELECT count(*) FROM reference_images refs WHERE refs.pet_id=p.id "
+            "AND refs.kind='positive')>=json_extract(rule.value,'$.min_references') "
+            "LEFT JOIN detections d ON d.id=r.detection_id AND d.detector=? "
+            "AND EXISTS(SELECT 1 FROM assets a WHERE a.id=d.asset_id AND a.revision=d.revision) "
+            "GROUP BY p.id ORDER BY p.name",
+            (json.dumps(policies), self.settings.recognizer_key, self.settings.detector_key),
+        )
+        for row in rows:
+            row["policy"] = policies.get(row["id"], {})
+            row["enabled"] = self.automation_enabled(row["id"])
+        return {
+            "mode": mode,
+            "profile": profile,
+            "active": options,
+            "pets": rows,
+            "provisional": self.suggestions_pending(),
+        }
+
+    def set_matching_options(self, mode, profile):
+        if mode not in {"adaptive", "fixed"} or profile not in PROFILES:
+            raise ValueError("Choose a matching mode and sorting preference")
+        with self.model_lock:
+            self.store.set_state("matching_options", json.dumps({"mode": mode, "profile": profile}))
+            self.gallery_changed()
+        return self.matching_preview()
 
     def evaluate(self, detection, gallery=None):
         model = self.settings.recognizer_key
@@ -246,13 +338,15 @@ class Service:
         )
         if existing and existing["status"] != "pending":
             return False
+        gallery = self.references() if gallery is None else gallery
         result = match_pet(
             self.embed(detection),
             detection["species"],
-            self.references() if gallery is None else gallery,
+            gallery,
             self.settings.match_threshold,
             self.settings.match_margin,
             self.settings.min_references,
+            self.policies(gallery),
         )
         automatic = result.confident and self.automation_enabled(result.pet_id)
         status = "confirmed" if automatic else "pending"
@@ -265,6 +359,7 @@ class Service:
                 (detection["id"], model, result.pet_id, result.score, result.margin, status),
             )
             if automatic:
+                self.group_cache = None
                 conn.execute(
                     "INSERT OR IGNORE INTO automatic_reviews VALUES (?,?)",
                     (detection["id"], model),
@@ -278,6 +373,7 @@ class Service:
         return bool(row["enabled"]) if row else self.settings.auto_tag
 
     def pets(self):
+        policies = self.policies()
         pets = self.store.rows(
             "SELECT p.*,count(CASE WHEN r.kind='positive' THEN 1 END) positive_count,"
             "count(CASE WHEN r.kind='negative' THEN 1 END) negative_count FROM pets p "
@@ -288,17 +384,18 @@ class Service:
             for row in self.store.rows(
                 "SELECT r.pet_id,"
                 "sum(r.status='pending') pending_count,"
-                "sum(r.status='pending' AND r.score>=? AND r.margin>=?) strong_count,"
+                "sum(r.status='pending' AND r.score>=json_extract(rule.value,'$.threshold') "
+                "AND r.margin>=json_extract(rule.value,'$.margin')) strong_count,"
                 "sum(r.status='confirmed' AND r.published=1) tagged_count,"
                 "sum(r.status='confirmed' AND r.published=0) queued_count,"
                 "sum(r.status='confirmed' AND r.published=1 AND ar.detection_id IS NOT NULL) "
                 "auto_tagged_count FROM reviews r JOIN detections d ON d.id=r.detection_id "
                 "JOIN assets a ON a.id=d.asset_id LEFT JOIN automatic_reviews ar "
                 "ON ar.detection_id=r.detection_id AND ar.model=r.model "
+                "LEFT JOIN json_each(?) rule ON rule.key=r.pet_id "
                 "WHERE r.model=? AND d.detector=? AND d.revision=a.revision GROUP BY r.pet_id",
                 (
-                    self.settings.match_threshold,
-                    self.settings.match_margin,
+                    json.dumps(policies),
                     self.settings.recognizer_key,
                     self.settings.detector_key,
                 ),
@@ -318,7 +415,10 @@ class Service:
                 }
             )
             pet["auto_tag"] = self.automation_enabled(pet["id"])
-            pet["example_gate_met"] = pet["positive_count"] >= self.settings.min_references
+            pet["policy"] = policies.get(pet["id"], {})
+            pet["example_gate_met"] = pet["positive_count"] >= pet["policy"].get(
+                "min_references", self.settings.min_references
+            )
             if not pet["example_gate_met"]:
                 pet["strong_count"] = 0
         return pets
@@ -477,6 +577,7 @@ class Service:
                 }
             self.rematch_requested.set()
             self.wake_event.set()
+            self.group_cache = None
         if self.settings.demo:
             self.rematch_requested.clear()
             self.rematch()
@@ -484,6 +585,7 @@ class Service:
     def recommendations(self, rows):
         """Fresh visible suggestions from cached vectors, without GPU work or tag writes."""
         gallery = self.references(cached_only=True)
+        policies = self.policies(gallery)
         names = {pet["id"]: pet["name"] for pet in gallery}
         excluded = {}
         for reference in self.store.rows(
@@ -504,9 +606,14 @@ class Service:
                 self.settings.match_threshold,
                 self.settings.match_margin,
                 self.settings.min_references,
+                policies,
             )
             if match.pet_id is None:
                 continue
+            policy = policies.get(match.pet_id, {})
+            threshold = policy.get("threshold", self.settings.match_threshold)
+            margin = policy.get("margin", self.settings.match_margin)
+            minimum = policy.get("min_references", self.settings.min_references)
             row["recommendation"] = {
                 "pet_id": match.pet_id,
                 "pet_name": names[match.pet_id],
@@ -518,20 +625,20 @@ class Service:
                     {
                         "label": "Examples",
                         "value": match.references,
-                        "required": self.settings.min_references,
-                        "passed": match.references >= self.settings.min_references,
+                        "required": minimum,
+                        "passed": match.references >= minimum,
                     },
                     {
                         "label": "Similarity",
                         "value": match.score,
-                        "required": self.settings.match_threshold,
-                        "passed": match.score >= self.settings.match_threshold,
+                        "required": threshold,
+                        "passed": match.score >= threshold,
                     },
                     {
                         "label": "Lead over look-alikes",
                         "value": match.margin,
-                        "required": self.settings.match_margin,
-                        "passed": match.margin >= self.settings.match_margin,
+                        "required": margin,
+                        "passed": match.margin >= margin,
                     },
                 ],
             }
@@ -540,6 +647,8 @@ class Service:
     def add_pet(self, name, species):
         pet = {"id": str(uuid.uuid4()), "name": name, "species": species, "tag": f"Pets/{name}"}
         self.store.execute("INSERT INTO pets VALUES (:id,:name,:species,:tag)", pet)
+        self.policy_cache = None
+        self.group_cache = None
         return pet
 
     def add_reference(self, pet_id, detection_id, kind):
@@ -559,6 +668,7 @@ class Service:
 
     def decide(self, detection_id, pet_id, status, learn=False, expected_pet_id=None):
         with self.model_lock:
+            self.group_cache = None
             detection = self.store.one(
                 "SELECT d.* FROM detections d JOIN assets a ON a.id=d.asset_id "
                 "WHERE d.id=? AND d.revision=a.revision AND d.detector=?",
@@ -820,22 +930,22 @@ class Service:
             row["reason"]: row["count"]
             for row in self.store.rows(
                 current + "SELECT CASE WHEN c.pet_id IS NULL THEN 'no_candidate' "
-                "WHEN coalesce(refs.count,0)<? THEN 'needs_examples' "
-                "WHEN c.score<? THEN 'below_similarity' "
-                "WHEN c.margin<? THEN 'ambiguous' "
+                "WHEN coalesce(refs.count,0)<json_extract(rule.value,'$.min_references') "
+                "THEN 'needs_examples' "
+                "WHEN c.score<json_extract(rule.value,'$.threshold') THEN 'below_similarity' "
+                "WHEN c.margin<json_extract(rule.value,'$.margin') THEN 'ambiguous' "
                 "WHEN coalesce(pa.enabled,?)=0 THEN 'automation_paused' "
                 "ELSE 'ready' END reason,count(*) count FROM current c "
                 "LEFT JOIN (SELECT pet_id,count(*) count FROM reference_images "
                 "WHERE kind='positive' GROUP BY pet_id) refs ON refs.pet_id=c.pet_id "
                 "LEFT JOIN pet_automation pa ON pa.pet_id=c.pet_id "
+                "LEFT JOIN json_each(?) rule ON rule.key=c.pet_id "
                 "WHERE c.status='pending' AND NOT EXISTS("
                 "SELECT 1 FROM tagged t WHERE t.asset_id=c.asset_id) GROUP BY reason",
                 (
                     *params,
-                    self.settings.min_references,
-                    self.settings.match_threshold,
-                    self.settings.match_margin,
                     int(self.settings.auto_tag),
+                    json.dumps(self.policies()),
                 ),
             )
         }
@@ -865,6 +975,7 @@ class Service:
             "min_references": self.settings.min_references,
             "match_threshold": self.settings.match_threshold,
             "match_margin": self.settings.match_margin,
+            "matching": self.matching_options(),
             "suggestions_updating": self.suggestions_pending(),
             "recheck": self.recheck_status(),
             "review_summary": self.review_summary(),

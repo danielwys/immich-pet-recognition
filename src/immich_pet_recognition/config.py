@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +20,7 @@ class Settings(BaseSettings):
     match_threshold: float = Field(default=0.85, ge=0, le=1)
     match_margin: float = Field(default=0.08, ge=0, le=2)
     min_references: int = Field(default=10, ge=1)
+    matching_mode: Literal["adaptive", "fixed"] = "adaptive"
     detector_threshold: float = Field(default=0.5, ge=0, le=1)
     provider: str = "CPUExecutionProvider"
     detector_repo: str = "open-noodle/rfdetr-nano"

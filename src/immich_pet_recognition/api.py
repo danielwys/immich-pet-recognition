@@ -41,6 +41,11 @@ class AutomationUpdate(BaseModel):
     enabled: bool
 
 
+class MatchingUpdate(BaseModel):
+    mode: Literal["adaptive", "fixed"] = "adaptive"
+    profile: Literal["careful", "balanced", "broader"] = "balanced"
+
+
 class Decision(BaseModel):
     status: Literal["confirmed", "rejected"]
     pet_id: UUID | None = None
@@ -129,6 +134,17 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
     @app.get("/api/pets", dependencies=auth)
     def pets():
         return service.pets()
+
+    @app.get("/api/matching", dependencies=auth)
+    def matching(
+        mode: Literal["adaptive", "fixed"] | None = None,
+        profile: Literal["careful", "balanced", "broader"] | None = None,
+    ):
+        return service.matching_preview(mode, profile)
+
+    @app.put("/api/matching", dependencies=auth)
+    def set_matching(body: MatchingUpdate):
+        return service.set_matching_options(body.mode, body.profile)
 
     @app.put("/api/pets/{pet_id}/automation", dependencies=auth)
     def set_automation(pet_id: UUID, body: AutomationUpdate):
