@@ -97,6 +97,7 @@ async function refresh() {
     pets.forEach((p) => picker.append(new Option(p.name, p.id)));
     picker.value = activePet;
     $("demo-banner").classList.toggle("hidden", !status.demo);
+    $("logout").classList.toggle("hidden", !status.auth_required);
     $("error-banner").classList.toggle("hidden", !status.last_error);
     $("error-banner").textContent = status.last_error || "";
     $("mode-label").textContent = status.demo
@@ -345,6 +346,10 @@ function renderSetup() {
           : "Awaiting a successful Immich sync",
     ],
     ["Automatic tagging", status.auto_tag ? "On" : "Off · review required"],
+    [
+      "Access",
+      status.auth_required ? "Service token required" : "Direct access · trusted network",
+    ],
     ["Detector", status.detector],
     ["Recognition model", status.recognizer],
     ["Execution provider", status.provider],

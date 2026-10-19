@@ -372,6 +372,7 @@ class Service:
         }
         return {
             "demo": self.settings.demo,
+            "auth_required": self.settings.auth_required and not self.settings.demo,
             "auto_tag": self.settings.auto_tag,
             "provider": self.settings.provider,
             "detector": self.settings.detector_repo,

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -54,8 +54,18 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
     app.state.service = service
     bearer = HTTPBearer(auto_error=False)
 
-    def authenticate(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
-        if settings.demo:
+    def authenticate(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ):
+        if settings.demo or not settings.auth_required:
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                origin = request.headers.get("origin")
+                expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+                if (origin is not None and origin != expected_origin) or request.headers.get(
+                    "sec-fetch-site"
+                ) == "cross-site":
+                    raise HTTPException(403, "Use the companion page to make changes")
             return
         token = credentials.credentials if credentials else ""
         if not secrets.compare_digest(token, settings.service_token.get_secret_value()):

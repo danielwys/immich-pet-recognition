@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     immich_url: str = "http://immich-server:2283"
     immich_api_key: SecretStr = SecretStr("")
     service_token: SecretStr = SecretStr("")
+    auth_required: bool = True
     data_dir: Path = Path("data")
     demo: bool = False
     background: bool = True
@@ -27,8 +28,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_configuration(self):
-        if not self.demo and not self.service_token.get_secret_value():
-            raise ValueError("Set PET_SERVICE_TOKEN, or use PET_DEMO=true for an offline preview")
+        if self.auth_required and not self.demo and not self.service_token.get_secret_value():
+            raise ValueError(
+                "Set PET_SERVICE_TOKEN, PET_AUTH_REQUIRED=false for a trusted network, "
+                "or PET_DEMO=true for an offline preview"
+            )
         if self.provider not in {"CPUExecutionProvider", "CUDAExecutionProvider"}:
             raise ValueError("PET_PROVIDER must be CPUExecutionProvider or CUDAExecutionProvider")
         if self.immich_url.startswith(("http://", "https://")) is False:

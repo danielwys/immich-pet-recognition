@@ -8,7 +8,8 @@ services:
     environment:
       PET_IMMICH_URL: ${PET_IMMICH_URL:-http://immich-server:2283}
       PET_IMMICH_API_KEY: ${PET_IMMICH_API_KEY:?Set the Immich API key in .env}
-      PET_SERVICE_TOKEN: ${PET_SERVICE_TOKEN:?Set a service token in .env}
+      PET_SERVICE_TOKEN: ${PET_SERVICE_TOKEN:-}
+      PET_AUTH_REQUIRED: ${PET_AUTH_REQUIRED:-true}
       PET_AUTO_TAG: ${PET_AUTO_TAG:-false}
       PET_POLL_SECONDS: ${PET_POLL_SECONDS:-300}
       PET_MATCH_THRESHOLD: ${PET_MATCH_THRESHOLD:-0.85}

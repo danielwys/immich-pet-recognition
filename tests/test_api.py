@@ -18,7 +18,53 @@ def test_private_data_and_controls_require_token(processed):
         detection = processed.store.one("SELECT id FROM detections")["id"]
         assert client.get(f"/api/detections/{detection}/crop").status_code == 401
         assert client.get("/api/status", headers=AUTH).status_code == 200
+        assert client.get("/api/status", headers=AUTH).json()["auth_required"] is True
         assert "test-api-key" not in client.get("/api/status", headers=AUTH).text
+
+
+def test_direct_access_keeps_real_data_and_controls_available_without_token(processed):
+    processed.settings.auth_required = False
+    with TestClient(create_app(processed.settings, processed)) as client:
+        response = client.get("/api/status")
+        assert response.status_code == 200
+        assert response.json()["auth_required"] is False
+        assert response.json()["demo"] is False
+        assert "test-api-key" not in response.text
+        assert "test-token" not in response.text
+        assert client.get("/api/pets").status_code == 200
+        detection = client.get("/api/detections").json()["items"][0]
+        assert client.get(f"/api/detections/{detection['id']}/crop").status_code == 200
+        assert (
+            client.post(
+                "/api/pets", json={"name": "Mochi"}, headers={"Origin": "http://testserver"}
+            ).status_code
+            == 201
+        )
+        assert client.post("/api/sync").status_code == 202
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Origin": "https://another-site.example"},
+        {"Origin": "null"},
+        {"Sec-Fetch-Site": "cross-site"},
+    ],
+)
+def test_direct_access_rejects_changes_from_other_websites(processed, headers):
+    processed.settings.auth_required = False
+    with TestClient(create_app(processed.settings, processed)) as client:
+        assert client.post("/api/sync", headers=headers).status_code == 403
+        assert client.post("/api/pets", json={"name": "Mochi"}, headers=headers).status_code == 403
+        assert not processed.sync_requested.is_set()
+        assert client.get("/api/pets").json() == []
+
+
+def test_real_deployments_must_explicitly_opt_out_of_token_authentication(tmp_path):
+    with pytest.raises(ValueError, match="PET_SERVICE_TOKEN"):
+        Settings(_env_file=None, service_token="", data_dir=tmp_path)
+    settings = Settings(_env_file=None, auth_required=False, service_token="", data_dir=tmp_path)
+    assert settings.auth_required is False
 
 
 def test_enroll_review_reference_and_crop_flow(processed):

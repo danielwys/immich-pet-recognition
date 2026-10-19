@@ -69,6 +69,13 @@ also use its smart search/human-face detection; GPU memory is shared with this s
    or an SSH tunnel (`ssh -L 8090:127.0.0.1:8090 user@nas`). Open the UI and enter the
    **service token**, not the Immich API key. All photo and management endpoints require it.
 
+   For direct access on a trusted home network, set `PET_AUTH_REQUIRED=false` and restart.
+   The UI will open without a token in any browser. Anyone who can reach the service can then
+   view photo crops and use its management/tagging controls; keep this port behind your
+   trusted network or an authenticated reverse proxy. The Immich API key remains on the server.
+   An empty service token does not disable authentication by itself: the service refuses to
+   start unless you explicitly opt into direct access.
+
 6. Register your pet. Scan the library, then add 30–50 varied crops as references. Add look-alike
    dogs as negative examples. Confirm matches manually; confirmed matches are tagged even with
    automatic tagging disabled. Failed writes appear on the crop card; retry them in Processing.
