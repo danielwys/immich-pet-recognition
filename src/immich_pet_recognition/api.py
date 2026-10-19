@@ -38,6 +38,30 @@ class ReferenceCreate(BaseModel):
 class Decision(BaseModel):
     status: Literal["confirmed", "rejected"]
     pet_id: UUID | None = None
+    learn: bool = False
+
+
+class BulkDecision(Decision):
+    detection_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+
+
+class BulkReview(BaseModel):
+    items: list[BulkDecision] = Field(min_length=1, max_length=100)
+
+    @field_validator("items")
+    @classmethod
+    def unique_detections(cls, items):
+        if len({item.detection_id for item in items}) != len(items):
+            raise ValueError("Each photo can appear only once in a batch")
+        return items
+
+
+class ReferenceAssignment(ReferenceCreate):
+    pet_id: UUID
+
+
+class ReferenceBatch(BaseModel):
+    items: list[ReferenceAssignment] = Field(min_length=1, max_length=100)
 
 
 def create_app(settings: Settings | None = None, service: Service | None = None):
@@ -112,11 +136,29 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         except ValueError as error:
             raise HTTPException(400, str(error)) from None
 
+    @app.post("/api/references/batch", dependencies=auth)
+    def bulk_references(body: ReferenceBatch):
+        results = []
+        with service.model_lock:
+            for item in body.items:
+                try:
+                    service.add_reference(str(item.pet_id), item.detection_id, item.kind)
+                    results.append({"id": item.detection_id, "saved": True})
+                except ValueError as error:
+                    results.append({"id": item.detection_id, "saved": False, "error": str(error)})
+        return {
+            "results": results,
+            "saved": sum(item["saved"] for item in results),
+            "failed": sum(not item["saved"] for item in results),
+        }
+
     @app.get("/api/detections", dependencies=auth)
     def detections(
         status: Literal["all", "pending", "confirmed", "rejected"] = "pending",
         offset: int = Query(default=0, ge=0),
-        limit: int = Query(default=24, ge=1, le=100),
+        limit: int = Query(default=48, ge=1, le=100),
+        sort: Literal["suggested", "newest"] = "suggested",
+        pet_id: UUID | None = None,
     ):
         clause = (
             "FROM detections d JOIN assets a ON a.id=d.asset_id "
@@ -127,15 +169,28 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         if status != "all":
             clause += " AND r.status=?"
             params.append(status)
+        if pet_id:
+            clause += " AND r.pet_id=?"
+            params.append(str(pet_id))
         count = service.store.one("SELECT count(*) total " + clause, params)["total"]
         rows = service.store.rows(
             "SELECT d.id,d.asset_id,d.species,d.score detector_score,d.box,a.name,"
             "r.pet_id,r.score,r.margin,r.status,r.published,r.error,p.name pet_name "
             + clause
-            + " ORDER BY d.rowid DESC LIMIT ? OFFSET ?",
+            + (
+                " ORDER BY r.score DESC,d.rowid DESC"
+                if sort == "suggested"
+                else " ORDER BY d.rowid DESC"
+            )
+            + " LIMIT ? OFFSET ?",
             [*params, limit, offset],
         )
-        return {"items": rows, "total": count, "offset": offset, "limit": limit}
+        return {
+            "items": service.recommendations(rows),
+            "total": count,
+            "offset": offset,
+            "limit": limit,
+        }
 
     @app.get("/api/detections/{detection_id}/crop", dependencies=auth)
     def crop(detection_id: str):
@@ -152,10 +207,32 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         if body.status == "confirmed" and body.pet_id is None:
             raise HTTPException(400, "Choose the pet to confirm")
         try:
-            service.decide(detection_id, str(body.pet_id) if body.pet_id else None, body.status)
+            service.decide(
+                detection_id, str(body.pet_id) if body.pet_id else None, body.status, body.learn
+            )
             return {"status": body.status, "writeback": "demo only" if settings.demo else "queued"}
         except ValueError as error:
             raise HTTPException(400, str(error)) from None
+
+    @app.post("/api/review/batch", dependencies=auth)
+    def bulk_review(body: BulkReview):
+        results = service.bulk_decide(
+            [
+                {
+                    "detection_id": item.detection_id,
+                    "pet_id": str(item.pet_id) if item.pet_id else None,
+                    "status": item.status,
+                    "learn": item.learn,
+                }
+                for item in body.items
+            ]
+        )
+        return {
+            "results": results,
+            "saved": sum(item["saved"] for item in results),
+            "failed": sum(not item["saved"] for item in results),
+            "writeback": "demo only" if settings.demo else "queued",
+        }
 
     @app.post("/api/sync", dependencies=auth, status_code=202)
     def sync(full: bool = False):

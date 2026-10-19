@@ -48,6 +48,18 @@ overwritten by rematching under that model. Switching models creates fresh revie
 leaving already-published Immich tags intact. A decision lock prevents a human rejection racing
 with publication. The service adds tags only; corrective tag removal happens in Immich.
 
+Bulk review validates each crop under the same decision lock. Valid rows are saved and invalid,
+stale, or already-published rows report individual errors. An explicit human assignment can also
+save a positive example in the same transaction. Correcting an identity removes conflicting
+positive membership and records the prior identity as a negative. Automatic evaluation never
+teaches the gallery. Existing confirmed crops can be enrolled in bulk without changing tags.
+
+Gallery revisions persist in SQLite so unfinished rematching resumes after a restart. A rematch
+reuses the gallery vectors for the pass and releases the model lock between crops to keep review
+responsive. Visible suggestions compare cached vectors on request, without inference or writeback;
+their response includes each matching gate. Best-first ordering across the library follows the
+background rematch. The UI preserves active selections and avoids redrawing unchanged card data.
+
 ## Scope and operational limits
 
 One Immich account and one running process. No distributed workers, arbitrary plugin loading,
@@ -56,6 +68,8 @@ The detector/recognizer protocols are code extension points; this is not a plugi
 Cache growth is unbounded in v1. Runtime status reports errors, but health currently proves only
 that the HTTP service is running, not that Immich or CUDA inference is ready.
 
-The service token protects data/control endpoints; the UI shell and health endpoint are public.
+The service token protects data/control endpoints by default; the UI shell and health endpoint are public.
+`PET_AUTH_REQUIRED=false` explicitly opts into direct access for trusted networks. In that mode,
+write requests from other browser origins are rejected, and the Immich API key remains server-side.
 Use HTTPS or a trusted SSH tunnel for remote access. No third-party scripts, web fonts, or analytics
 are loaded. Demo illustrations and scores are synthetic and isolated from real inference.

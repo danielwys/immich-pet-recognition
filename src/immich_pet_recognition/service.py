@@ -58,7 +58,11 @@ class Service:
             from .demo import seed_demo
 
             seed_demo(self)
+            if self.suggestions_pending():
+                self.rematch()
         elif self.settings.background:
+            if self.suggestions_pending():
+                self.rematch_requested.set()
             self.worker = threading.Thread(target=self.run, name="pet-worker", daemon=True)
             self.worker.start()
 
@@ -75,15 +79,15 @@ class Service:
         next_poll = 0.0
         while not self.stop_event.is_set():
             try:
+                if self.rematch_requested.is_set():
+                    self.rematch_requested.clear()
+                    self.rematch()
                 if self.sync_requested.is_set() or time.monotonic() >= next_poll:
                     self.sync_requested.clear()
                     full = self.backfill_requested.is_set()
                     self.backfill_requested.clear()
                     self.sync(full=full)
                     next_poll = time.monotonic() + self.settings.poll_seconds
-                if self.rematch_requested.is_set():
-                    self.rematch_requested.clear()
-                    self.rematch()
                 if self.publish_one():
                     continue
                 if self.process_one():
@@ -213,7 +217,7 @@ class Service:
             self.store.save_embedding(detection["id"], self.settings.recognizer_key, vector)
         return vector
 
-    def references(self):
+    def references(self, cached_only=False):
         gallery = []
         for pet in self.store.rows("SELECT * FROM pets ORDER BY name"):
             pet["positive"], pet["negative"] = [], []
@@ -223,11 +227,17 @@ class Service:
                 "WHERE r.pet_id=?",
                 (pet["id"],),
             ):
-                pet[reference["kind"]].append(self.embed(reference))
+                vector = (
+                    self.store.embedding(reference["id"], self.settings.recognizer_key)
+                    if cached_only
+                    else self.embed(reference)
+                )
+                if vector is not None:
+                    pet[reference["kind"]].append(vector)
             gallery.append(pet)
         return gallery
 
-    def evaluate(self, detection):
+    def evaluate(self, detection, gallery=None):
         model = self.settings.recognizer_key
         existing = self.store.one(
             "SELECT * FROM reviews WHERE detection_id=? AND model=?", (detection["id"], model)
@@ -237,7 +247,7 @@ class Service:
         result = match_pet(
             self.embed(detection),
             detection["species"],
-            self.references(),
+            self.references() if gallery is None else gallery,
             self.settings.match_threshold,
             self.settings.match_margin,
             self.settings.min_references,
@@ -253,15 +263,96 @@ class Service:
 
     def rematch(self):
         with self.model_lock:
-            for detection in self.store.rows(
-                "SELECT d.* FROM detections d JOIN assets a ON a.id=d.asset_id "
-                "WHERE d.revision=a.revision AND d.detector=?",
-                (self.settings.detector_key,),
-            ):
+            revision = self.store.state("gallery_revision", "0")
+            gallery = self.references()
+        for detection in self.store.rows(
+            "SELECT d.* FROM detections d JOIN assets a ON a.id=d.asset_id "
+            "JOIN reviews r ON r.detection_id=d.id AND r.model=? "
+            "WHERE d.revision=a.revision AND d.detector=? AND r.status='pending'",
+            (self.settings.recognizer_key, self.settings.detector_key),
+        ):
+            with self.model_lock:
                 if self.stop_event.is_set():
                     return
+                if revision != self.store.state("gallery_revision", "0"):
+                    self.rematch_requested.set()
+                    return
                 self.embed(detection)
-                self.evaluate(detection)
+                self.evaluate(detection, gallery)
+        self.store.set_state("matched_gallery_revision", revision)
+
+    def suggestions_pending(self):
+        return self.store.state("gallery_revision", "0") != self.store.state(
+            "matched_gallery_revision", "0"
+        )
+
+    def gallery_changed(self):
+        with self.store.connection() as conn:
+            conn.execute(
+                "INSERT INTO state VALUES ('gallery_revision','1') ON CONFLICT(key) "
+                "DO UPDATE SET value=CAST(value AS INTEGER)+1"
+            )
+        self.rematch_requested.set()
+        self.wake_event.set()
+        if self.settings.demo:
+            self.rematch_requested.clear()
+            self.rematch()
+
+    def recommendations(self, rows):
+        """Fresh visible suggestions from cached vectors, without GPU work or tag writes."""
+        gallery = self.references(cached_only=True)
+        names = {pet["id"]: pet["name"] for pet in gallery}
+        excluded = {}
+        for reference in self.store.rows(
+            "SELECT pet_id,detection_id FROM reference_images WHERE kind='negative'"
+        ):
+            excluded.setdefault(reference["detection_id"], set()).add(reference["pet_id"])
+        for row in rows:
+            row["recommendation"] = None
+            if row["status"] != "pending":
+                continue
+            vector = self.store.embedding(row["id"], self.settings.recognizer_key)
+            if vector is None:
+                continue
+            match = match_pet(
+                vector,
+                row["species"],
+                [pet for pet in gallery if pet["id"] not in excluded.get(row["id"], set())],
+                self.settings.match_threshold,
+                self.settings.match_margin,
+                self.settings.min_references,
+            )
+            if match.pet_id is None:
+                continue
+            row["recommendation"] = {
+                "pet_id": match.pet_id,
+                "pet_name": names[match.pet_id],
+                "score": match.score,
+                "margin": match.margin,
+                "references": match.references,
+                "confident": match.confident,
+                "gates": [
+                    {
+                        "label": "Examples",
+                        "value": match.references,
+                        "required": self.settings.min_references,
+                        "passed": match.references >= self.settings.min_references,
+                    },
+                    {
+                        "label": "Similarity",
+                        "value": match.score,
+                        "required": self.settings.match_threshold,
+                        "passed": match.score >= self.settings.match_threshold,
+                    },
+                    {
+                        "label": "Lead over look-alikes",
+                        "value": match.margin,
+                        "required": self.settings.match_margin,
+                        "passed": match.margin >= self.settings.match_margin,
+                    },
+                ],
+            }
+        return rows
 
     def add_pet(self, name, species):
         pet = {"id": str(uuid.uuid4()), "name": name, "species": species, "tag": f"Pets/{name}"}
@@ -281,10 +372,9 @@ class Service:
                 "DO UPDATE SET kind=excluded.kind",
                 (pet_id, detection_id, kind),
             )
-        self.rematch_requested.set()
-        self.wake_event.set()
+            self.gallery_changed()
 
-    def decide(self, detection_id, pet_id, status):
+    def decide(self, detection_id, pet_id, status, learn=False):
         with self.model_lock:
             detection = self.store.one(
                 "SELECT d.* FROM detections d JOIN assets a ON a.id=d.asset_id "
@@ -297,6 +387,8 @@ class Service:
                 pet = self.store.one("SELECT * FROM pets WHERE id=?", (pet_id,))
                 if pet is None or pet["species"] != detection["species"]:
                     raise ValueError("Choose a pet with the same species")
+            if status == "confirmed" and not pet_id:
+                raise ValueError("Choose the pet to confirm")
             row = self.store.one(
                 "SELECT * FROM reviews WHERE detection_id=? AND model=?",
                 (detection_id, self.settings.recognizer_key),
@@ -307,11 +399,47 @@ class Service:
                 raise ValueError(
                     "Already published; correct this tag in Immich before changing review"
                 )
-            self.store.execute(
-                "UPDATE reviews SET pet_id=?,status=?,error=NULL WHERE detection_id=? AND model=?",
-                (pet_id, status, detection_id, self.settings.recognizer_key),
-            )
+            with self.store.connection() as conn:
+                conn.execute(
+                    "UPDATE reviews SET pet_id=?,status=?,error=NULL "
+                    "WHERE detection_id=? AND model=?",
+                    (pet_id, status, detection_id, self.settings.recognizer_key),
+                )
+                if learn and status == "confirmed":
+                    # Only an explicit human assignment can teach the gallery.
+                    conn.execute(
+                        "DELETE FROM reference_images WHERE detection_id=? AND kind='positive' "
+                        "AND pet_id<>?",
+                        (detection_id, pet_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO reference_images VALUES (?,?,'positive') "
+                        "ON CONFLICT(pet_id,detection_id) DO UPDATE SET kind='positive'",
+                        (pet_id, detection_id),
+                    )
+                    if row["pet_id"] and row["pet_id"] != pet_id:
+                        conn.execute(
+                            "INSERT INTO reference_images VALUES (?,?,'negative') "
+                            "ON CONFLICT(pet_id,detection_id) DO UPDATE SET kind='negative'",
+                            (row["pet_id"], detection_id),
+                        )
+            if learn and status == "confirmed":
+                self.gallery_changed()
         self.wake_event.set()
+
+    def bulk_decide(self, items):
+        results = []
+        # Publication cannot race the batch; individual invalid rows remain untouched.
+        with self.model_lock:
+            for item in items:
+                try:
+                    self.decide(item["detection_id"], item["pet_id"], item["status"], item["learn"])
+                    results.append({"id": item["detection_id"], "saved": True})
+                except ValueError as error:
+                    results.append(
+                        {"id": item["detection_id"], "saved": False, "error": str(error)}
+                    )
+        return results
 
     def publish_one(self):
         with self.model_lock:
@@ -386,6 +514,7 @@ class Service:
             "min_references": self.settings.min_references,
             "match_threshold": self.settings.match_threshold,
             "match_margin": self.settings.match_margin,
+            "suggestions_updating": self.suggestions_pending(),
             "reviews": {
                 r["status"]: r["count"]
                 for r in self.store.rows(

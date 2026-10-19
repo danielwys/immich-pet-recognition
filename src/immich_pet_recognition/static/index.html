@@ -49,10 +49,11 @@
       <div id="error-banner" class="banner error hidden" role="alert"></div>
       <section class="page-intro">
         <div>
-          <span class="eyebrow">A LITTLE HELP FINDING THE FAMILIAR</span>
-          <h1 id="page-title">Every photo. Your pet.</h1>
+          <span class="eyebrow">PET RECOGNITION</span>
+          <h1 id="page-title">Review your pets.</h1>
           <p id="page-description">
-            Review the animals we found, and tell us who belongs to your family.
+            Select photos, assign them together, and improve the next
+            suggestions.
           </p>
         </div>
         <button id="sync" class="primary">
@@ -80,14 +81,25 @@
       <section id="review-panel" class="panel">
         <div class="section-heading">
           <div>
-            <h2>A few familiar faces?</h2>
-            <p>
-              Similarity is a comparison score, not a certainty. You make the
-              final call.
+            <h2>Teach a few. Review in batches.</h2>
+            <p id="suggestion-state" role="status">
+              Checking your example galleries…
             </p>
           </div>
           <span id="review-total" class="pill">0 detections</span>
         </div>
+        <div id="learning-progress" class="learning-progress"></div>
+        <details class="match-guide">
+          <summary id="match-guide-summary">
+            What makes a strong suggestion?
+          </summary>
+          <p id="match-guide-text"></p>
+          <p>
+            Similarity is not a probability. These defaults need checking on
+            photos you have kept out of the example gallery. More examples do
+            not guarantee accuracy.
+          </p>
+        </details>
         <div class="toolbar">
           <div class="filters" aria-label="Review filter">
             <button data-filter="pending" class="selected" aria-pressed="true">
@@ -98,12 +110,50 @@
               Dismissed</button
             ><button data-filter="all" aria-pressed="false">All</button>
           </div>
+          <div
+            id="pet-filters"
+            class="pet-filters"
+            aria-label="Filter by pet"
+          ></div>
           <label class="pet-picker"
-            >Review as
-            <select id="active-pet" aria-label="Pet to review as">
-              <option value="">Register a pet first</option>
+            >Sort
+            <select id="review-sort" aria-label="Review order">
+              <option value="suggested">Best suggestions first</option>
+              <option value="newest">Newest first</option>
             </select></label
           >
+        </div>
+        <div class="batch-bar" aria-label="Bulk review">
+          <div class="batch-top">
+            <button id="select-page" class="secondary">Select shown</button>
+            <button id="select-strong" class="secondary">
+              Select strong suggestions
+            </button>
+            <button id="clear-selection" class="quiet">Clear</button>
+            <strong id="selection-count" aria-live="polite">0 selected</strong>
+          </div>
+          <div class="batch-actions">
+            <span>Assign selected:</span>
+            <div id="batch-pets" class="assignment-buttons"></div>
+            <button id="accept-suggestions" class="primary" disabled>
+              Accept suggested identities
+            </button>
+            <button id="teach-confirmed" class="secondary" disabled>
+              Use confirmed as examples
+            </button>
+            <button id="dismiss-selected" class="quiet" disabled>
+              Dismiss selected
+            </button>
+          </div>
+          <label class="learn-option"
+            ><input type="checkbox" id="learn-from-assignments" checked /> Use
+            my assignments as examples
+            <span
+              >Updates suggestions after each batch. Automatic matches never
+              teach themselves.</span
+            ></label
+          >
+          <p id="batch-feedback" class="batch-feedback" role="status"></p>
         </div>
         <div id="review-grid" class="review-grid"></div>
         <div class="pagination">
@@ -114,9 +164,9 @@
         <div class="tip">
           <span aria-hidden="true">✦</span>
           <p>
-            <strong>Start with a reference gallery.</strong> Add varied, clear
-            crops of your pet. Add similar-looking animals as negative examples.
-            Automatic tagging starts off.
+            <strong>Already confirmed photos in the old interface?</strong> Open
+            Confirmed, select them, then choose “Use confirmed as examples”.
+            Their existing tags stay in place.
           </p>
           <button class="quiet" data-panel="pets">Manage pets →</button>
         </div>
@@ -186,7 +236,8 @@
           <p>
             Configure the Immich URL, API key, and service token in your Compose
             environment. Trusted networks can use direct access. The Immich API
-            key stays on the server. Run one instance against one Immich account.
+            key stays on the server. Run one instance against one Immich
+            account.
           </p>
         </div>
         <button id="logout" class="secondary">

@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -15,6 +17,8 @@ def test_private_data_and_controls_require_token(processed):
         for path in ["/api/status", "/api/pets", "/api/detections", "/api/jobs"]:
             assert client.get(path).status_code == 401
         assert client.post("/api/sync").status_code == 401
+        assert client.post("/api/review/batch", json={"items": []}).status_code == 401
+        assert client.post("/api/references/batch", json={"items": []}).status_code == 401
         detection = processed.store.one("SELECT id FROM detections")["id"]
         assert client.get(f"/api/detections/{detection}/crop").status_code == 401
         assert client.get("/api/status", headers=AUTH).status_code == 200
@@ -142,3 +146,137 @@ def test_demo_cannot_open_real_photo_cache(processed):
     demo = processed.settings.model_copy(update={"demo": True})
     with pytest.raises(ValueError, match="separate"):
         Service(demo)
+
+
+def add_another_photo(service):
+    asset = {**service.immich.items[0], "id": str(uuid4()), "originalFileName": "another-dog.jpg"}
+    service.immich.items.append(asset)
+    service.sync()
+    service.process_one()
+    return service.store.one("SELECT id FROM detections WHERE asset_id=?", (asset["id"],))["id"]
+
+
+def test_bulk_assignment_teaches_and_immediately_suggests_without_model_work(processed):
+    second = add_another_photo(processed)
+    first = processed.store.one("SELECT id FROM detections WHERE id<>?", (second,))["id"]
+    pet = processed.add_pet("Mochi", "dog")
+    calls = (processed.detector.calls, processed.recognizer.calls)
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        assert all(
+            row["recommendation"] is None for row in client.get("/api/detections").json()["items"]
+        )
+        response = client.post(
+            "/api/review/batch",
+            json={
+                "items": [
+                    {
+                        "detection_id": first,
+                        "pet_id": pet["id"],
+                        "status": "confirmed",
+                        "learn": True,
+                    }
+                ]
+            },
+        )
+        assert response.json()["saved"] == 1
+        assert response.json()["failed"] == 0
+        suggestion = client.get("/api/detections").json()["items"][0]["recommendation"]
+        assert suggestion["pet_id"] == pet["id"]
+        assert suggestion["score"] == pytest.approx(1)
+        assert suggestion["references"] == 1
+        assert suggestion["confident"] is False
+        assert [gate["passed"] for gate in suggestion["gates"]] == [False, True, True]
+        assert client.get("/api/pets").json()[0]["positive_count"] == 1
+        assert client.get("/api/status").json()["suggestions_updating"] is True
+        assert client.get("/api/status").json()["auto_tag"] is False
+    assert (processed.detector.calls, processed.recognizer.calls) == calls
+    assert (
+        processed.store.one("SELECT status FROM reviews WHERE detection_id=?", (second,))["status"]
+        == "pending"
+    )
+
+
+def test_bulk_partial_failures_never_teach_invalid_or_published_rows(processed):
+    second = add_another_photo(processed)
+    first = processed.store.one("SELECT id FROM detections WHERE id<>?", (second,))["id"]
+    pet = processed.add_pet("Mochi", "dog")
+    processed.decide(first, pet["id"], "confirmed")
+    processed.publish_one()
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        response = client.post(
+            "/api/review/batch",
+            json={
+                "items": [
+                    {
+                        "detection_id": item,
+                        "pet_id": pet["id"],
+                        "status": "confirmed",
+                        "learn": True,
+                    }
+                    for item in [first, second, "a" * 32]
+                ]
+            },
+        )
+        assert response.json()["saved"] == 1
+        assert response.json()["failed"] == 2
+        assert client.get("/api/pets").json()[0]["positive_count"] == 1
+        duplicate = {"detection_id": second, "pet_id": pet["id"], "status": "confirmed"}
+        assert (
+            client.post("/api/review/batch", json={"items": [duplicate, duplicate]}).status_code
+            == 422
+        )
+
+
+def test_existing_published_confirmations_can_become_examples_without_retagging(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    pet = processed.add_pet("Mochi", "dog")
+    processed.decide(detection, pet["id"], "confirmed")
+    processed.publish_one()
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        assert client.get("/api/pets").json()[0]["positive_count"] == 0
+        assert (
+            client.post(
+                "/api/references/batch",
+                json={
+                    "items": [{"detection_id": detection, "pet_id": pet["id"], "kind": "positive"}]
+                },
+            ).json()["saved"]
+            == 1
+        )
+        assert client.get("/api/pets").json()[0]["positive_count"] == 1
+    assert not processed.publish_one()
+    assert len(processed.immich.tag_calls) == 1
+
+
+def test_match_gates_and_pet_filter_follow_refreshed_ranking(processed):
+    second = add_another_photo(processed)
+    first = processed.store.one("SELECT id FROM detections WHERE id<>?", (second,))["id"]
+    pet = processed.add_pet("Mochi", "dog")
+    processed.settings.min_references = 1
+    processed.decide(first, pet["id"], "confirmed", learn=True)
+    processed.rematch()
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        rows = client.get(f"/api/detections?pet_id={pet['id']}&sort=suggested").json()["items"]
+        assert len(rows) == 1
+        assert rows[0]["id"] == second
+        assert rows[0]["recommendation"]["confident"] is True
+        assert all(g["passed"] for g in rows[0]["recommendation"]["gates"])
+        assert client.get("/api/status").json()["suggestions_updating"] is False
+        assert rows[0]["status"] == "pending"
+
+
+def test_rejecting_a_suggested_identity_keeps_photo_pending_and_removes_that_suggestion(processed):
+    second = add_another_photo(processed)
+    first = processed.store.one("SELECT id FROM detections WHERE id<>?", (second,))["id"]
+    pet = processed.add_pet("Mochi", "dog")
+    processed.decide(first, pet["id"], "confirmed", learn=True)
+    with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
+        assert client.get("/api/detections").json()["items"][0]["recommendation"] is not None
+        response = client.post(
+            "/api/references/batch",
+            json={"items": [{"detection_id": second, "pet_id": pet["id"], "kind": "negative"}]},
+        )
+        assert response.json()["saved"] == 1
+        row = client.get("/api/detections").json()["items"][0]
+        assert row["recommendation"] is None
+        assert row["status"] == "pending"

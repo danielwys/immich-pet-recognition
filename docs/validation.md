@@ -1,5 +1,20 @@
 # Validation
 
+## Review redesign checked on 19 October 2026
+
+**46 tests pass**, plus Ruff lint/formatting and a JavaScript syntax check. Added checks cover
+bulk assignment with example enrollment, immediate fresh suggestions using cached vectors,
+visible gate results, identity corrections, durable rematch recovery, partial batch failures,
+published-tag protection, existing confirmations enrolled without retagging, and excluding a
+suggested identity without discarding the crop. Token-protected defaults and explicit direct
+access remain covered.
+
+Browser checks with isolated synthetic demo data covered multi-photo assignment, example-count
+progress, per-photo suggestions, disabling example enrollment, reusing existing confirmations,
+and bulk acceptance of strong suggestions. A separate demo with a three-example gate exercised
+the strong-match controls; the production default remains ten. The layout was inspected at
+desktop and 390-pixel phone width. These checks verify workflow behavior, not identity accuracy.
+
 ## Checked on 11 October 2026
 
 **34 tests pass.** Lint, formatting, source distribution, and wheel builds pass. The test client

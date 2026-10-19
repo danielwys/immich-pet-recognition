@@ -210,3 +210,34 @@ def test_close_rival_or_insufficient_references_blocks_auto_match():
     assert not match_pet(vector, "dog", [pet, rival], 0.85, 0.08, 10).confident
     assert match_pet(vector, "dog", [pet], 0.85, 0.08, 10).confident
     assert not match_pet(vector, "cat", [pet], 0.85, 0.08, 10).confident
+
+
+def test_human_correction_teaches_positive_and_negative_examples(processed):
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    first = processed.add_pet("Mochi", "dog")
+    second = processed.add_pet("Milo", "dog")
+    processed.decide(detection, first["id"], "confirmed", learn=True)
+    processed.decide(detection, second["id"], "confirmed", learn=True)
+    gallery = {pet["id"]: pet for pet in processed.references()}
+    assert len(gallery[first["id"]]["positive"]) == 0
+    assert len(gallery[first["id"]]["negative"]) == 1
+    assert len(gallery[second["id"]]["positive"]) == 1
+    processed.rematch()
+    assert processed.store.one("SELECT pet_id,status FROM reviews") == {
+        "pet_id": second["id"],
+        "status": "confirmed",
+    }
+
+
+def test_unfinished_gallery_matching_is_recovered_on_restart(processed):
+    pet = processed.add_pet("Mochi", "dog")
+    detection = processed.store.one("SELECT id FROM detections")["id"]
+    processed.decide(detection, pet["id"], "confirmed", learn=True)
+    restarted = Service(
+        processed.settings, processed.immich, processed.detector, processed.recognizer
+    )
+    assert restarted.suggestions_pending()
+    restarted.rematch()
+    assert not restarted.suggestions_pending()
+    assert restarted.store.one("SELECT status FROM reviews")["status"] == "confirmed"
+    restarted.close()

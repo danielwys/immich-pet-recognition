@@ -84,6 +84,30 @@ The first real scan downloads pinned model weights from Hugging Face. RF-DETR Na
 the Large recognizer is approximately 1.2 GB. Models run locally after download. The CUDA
 runtime refuses silent CPU fallback if the requested provider fails to initialize.
 
+## Review and examples
+
+Select photo crops and click a named pet button to assign the whole selection. There is no
+global pet dropdown. **Use my assignments as examples** is checked by default; leave it on
+to teach the gallery from your explicit assignments, or turn it off to reserve those photos
+for a separate accuracy check. Model-generated automatic matches never add their own examples.
+
+Suggestions for visible photos use the latest cached example vectors immediately. A background
+pass refreshes rankings across the library without downloading photos or running detection again.
+The UI shows when that pass is pending. Manual decisions and published tags survive rematching.
+Use **Not [pet]** to exclude that identity while leaving the crop available for another pet;
+**Dismiss** removes the crop from the pending queue without guessing a negative identity.
+
+The progress cards and every suggestion expose the three matching gates: **10 examples**, cosine
+similarity **0.85**, and separation from competing identities/negative examples **0.08** by default.
+Suggestions can appear with the first example. A **strong suggestion** passes all three gates;
+it is not a calibrated probability or a guarantee of correct identity. **Select strong suggestions**
+and **Accept suggested identities** approve the selected photos together, using each photo's
+own suggested pet. Selection is limited to the displayed page (up to 48 crops).
+
+To teach from photos confirmed in the original interface, open **Confirmed**, select photos,
+and choose **Use confirmed as examples**. This also works for already-tagged photos and does not
+rewrite their tags. Batch results report individual failures instead of silently losing them.
+
 ## Automatic tagging
 
 Check performance on a held-out set that is not in the reference gallery. Tune the similarity
@@ -93,8 +117,8 @@ are placeholders, not model-vendor recommendations or proven accuracy guarantees
 Set `PET_AUTO_TAG=true` only after calibration and restart the service. A match must clear both
 thresholds and have at least `PET_MIN_REFERENCES` positive references. Explicitly rejected or
 confirmed decisions survive rematching. Confirmed tags are additive; the service never removes
-existing tags. Correct already-published mistakes in Immich. Confirmed photos do not automatically
-become training references, preventing a feedback loop from a mistaken match.
+existing tags. Correct already-published mistakes in Immich. Only explicit human assignments
+with the examples option enabled, or an explicit example action, change the reference gallery.
 
 ## Cache, persistence, and upgrades
 
