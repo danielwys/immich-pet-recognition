@@ -7,9 +7,12 @@ const vm = require("node:vm");
 function session() {
   const nodes = new Map(),
     storage = new Map(),
+    responses = new Map(),
     errors = [];
   function element(tag = "div") {
-    const classes = new Set();
+    const classes = new Set(),
+      attributes = new Map(),
+      listeners = new Map();
     let id,
       text = "";
     return {
@@ -44,7 +47,18 @@ function session() {
           return classes.has(name);
         },
       },
-      addEventListener() {},
+      addEventListener(type, listener) {
+        listeners.set(type, listener);
+      },
+      click() {
+        return listeners.get("click")?.({ target: this, stopPropagation() {} });
+      },
+      showModal() {
+        this.open = true;
+      },
+      close() {
+        this.open = false;
+      },
       replaceChildren(...children) {
         text = "";
         this.children = children;
@@ -52,10 +66,29 @@ function session() {
       append(...children) {
         this.children.push(...children);
       },
-      querySelectorAll() {
-        return [];
+      querySelectorAll(selector) {
+        const descendants = this.children.flatMap((child) => [
+          child,
+          ...child.querySelectorAll("*"),
+        ]);
+        return selector === "*"
+          ? descendants
+          : descendants.filter((child) =>
+              child.className?.split(" ").includes(selector.slice(1)),
+            );
       },
-      setAttribute() {},
+      querySelector(selector) {
+        return this.querySelectorAll(selector)[0] || null;
+      },
+      setAttribute(key, value) {
+        attributes.set(key, value);
+      },
+      getAttribute(key) {
+        return attributes.get(key) || null;
+      },
+      removeAttribute(key) {
+        attributes.delete(key);
+      },
       dataset: {},
       open: false,
     };
@@ -79,6 +112,7 @@ function session() {
       return [];
     },
     createElement: element,
+    createElementNS: (_, tag) => element(tag),
     addEventListener() {},
     body: element(),
     images: [],
@@ -110,6 +144,8 @@ function session() {
     clearTimeout() {},
     fetch(url) {
       if (phase === "bootstrap") return new Promise(() => {});
+      if (responses.has(url))
+        return Promise.resolve(response(responses.get(url)));
       if (url === "/api/status")
         return new Promise((resolve) => {
           releaseStatus = (body) =>
@@ -156,6 +192,9 @@ function session() {
     nodes,
     storage,
     errors,
+    respond(path, body) {
+      responses.set(path, body);
+    },
     start() {
       phase = "responses";
     },
@@ -245,5 +284,61 @@ test("connection details load and keep updating without clearing a Settings form
   app.release(healthy);
   await pending;
   assert.equal(values()[0], "Connected");
+  assert.deepEqual(app.errors, []);
+});
+
+test("expanded groups show whole photos once and preserve selection when opening them larger", async () => {
+  const app = session();
+  app.start();
+  app.respond("/api/groups/inspect", {
+    id: "inspect",
+    photo_count: 2,
+    members: [
+      { id: "crop-a", asset_id: "photo-one", name: "one.jpg" },
+      { id: "crop-b", asset_id: "photo-one", name: "one.jpg" },
+      { id: "crop-c", asset_id: "photo-two", name: "two.jpg" },
+    ],
+  });
+  vm.runInContext(
+    "view={type:'unidentified',items:[]}; pets=[{id:'mimi',name:'Mimi'}]; cropCache.set('photo:crop-a:1280','full-one'); cropCache.set('photo:crop-c:1280','full-two');",
+    app.context,
+  );
+  await vm.runInContext("openDetail({id:'inspect'})", app.context);
+  const grid = app.nodes.get("detail-grid");
+  assert.equal(grid.children.length, 2);
+  for (const tile of grid.children) {
+    assert.equal(tile.children[0].dataset.mediaKind, "photo");
+    assert.equal(tile.children[0].dataset.cropSize, 640);
+  }
+  grid.children[0].querySelector(".tile-zoom").click();
+  assert.equal(app.nodes.get("viewer").open, true);
+  assert.equal(app.nodes.get("group-detail").open, true);
+  assert.equal(app.nodes.get("viewer-image").src, "full-one");
+  assert.equal(vm.runInContext("detailSelected.size", app.context), 3);
+  const actions = app.nodes.get("viewer-actions");
+  assert.deepEqual(
+    actions.children
+      .filter((e) => e.tagName === "BUTTON")
+      .map((e) => e.textContent),
+    ["Included in group", "Back to group"],
+  );
+  actions.children.find((e) => e.textContent === "Included in group").click();
+  assert.deepEqual(
+    JSON.parse(
+      vm.runInContext("JSON.stringify([...detailSelected])", app.context),
+    ),
+    ["crop-c"],
+  );
+  assert.equal(app.nodes.get("detail-count").textContent, "1 photo selected");
+  assert.equal(grid.children[0].getAttribute("aria-checked"), "false");
+  actions.children.find((e) => e.textContent === "Back to group").click();
+  assert.equal(app.nodes.get("viewer").open, false);
+  assert.equal(app.nodes.get("group-detail").open, true);
+  grid.children[0].click();
+  assert.equal(app.nodes.get("detail-count").textContent, "2 photos selected");
+  assert.equal(vm.runInContext("detailSelected.size", app.context), 3);
+  app.nodes.get("detail-toggle").click();
+  assert.equal(app.nodes.get("detail-count").textContent, "0 photos selected");
+  assert.equal(vm.runInContext("outbox.pending", app.context), 0);
   assert.deepEqual(app.errors, []);
 });

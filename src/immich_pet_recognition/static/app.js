@@ -10,6 +10,7 @@ let selected = new Set(),
   lastSelected = -1,
   viewerIndex = 0;
 let detailGroup = null,
+  detailPhotos = [],
   detailSelected = new Set(),
   lastUndo = null;
 let dismissedUndoId = sessionStorage.getItem("pet-dismissed-undo") || "";
@@ -36,6 +37,17 @@ function button(text, className, action, label) {
     Promise.resolve(action(event)).catch(showError);
   });
   return element;
+}
+function expandButton(action, label) {
+  const expand = button("", "tile-zoom", action, label);
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("aria-hidden", "true");
+  const arrows = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  arrows.setAttribute("d", "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7");
+  icon.append(arrows);
+  expand.append(icon);
+  return expand;
 }
 function link(text, href, className) {
   const element = el("a", className, text);
@@ -743,23 +755,12 @@ function photoTile(item, index) {
   } else tile.append(photoImage(item));
   tile.append(el("span", "photo-check", selected.has(key) ? "✓" : ""));
   if (group) {
-    const expand = button(
-      "",
-      "tile-zoom",
-      () => openDetail(item),
-      `Inspect ${plural(item.photo_count, "similar photo")}`,
+    tile.append(
+      expandButton(
+        () => openDetail(item),
+        `Inspect ${plural(item.photo_count, "similar photo")}`,
+      ),
     );
-    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    icon.setAttribute("viewBox", "0 0 24 24");
-    icon.setAttribute("aria-hidden", "true");
-    const arrows = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "path",
-    );
-    arrows.setAttribute("d", "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7");
-    icon.append(arrows);
-    expand.append(icon);
-    tile.append(expand);
   }
   return tile;
 }
@@ -1150,9 +1151,11 @@ $("dismiss-undo").addEventListener("click", () => {
   status.undo_group = null;
   renderUndo();
 });
-let viewerItems = [];
-function openViewer(items, index) {
+let viewerItems = [],
+  viewerFromDetail = false;
+function openViewer(items, index, fromDetail = false) {
   viewerItems = items;
+  viewerFromDetail = fromDetail;
   viewerIndex = index;
   renderViewer();
   if (!$("viewer").open) $("viewer").showModal();
@@ -1162,7 +1165,9 @@ function renderViewer() {
   if (!row) return;
   $("viewer-name").textContent = row.name || "Photo";
   const img = $("viewer-image");
-  const preview = cropCache.get(`photo:${row.id}:320`);
+  const preview =
+    cropCache.get(`photo:${row.id}:640`) ||
+    cropCache.get(`photo:${row.id}:320`);
   if (preview) img.src = preview;
   else img.removeAttribute("src");
   img.alt = row.name || "Pet photo";
@@ -1180,6 +1185,23 @@ function renderViewer() {
         "Unidentified",
     ),
   );
+  if (viewerFromDetail) {
+    const included = row.assignment_ids.every((id) => detailSelected.has(id));
+    const include = button(
+      included ? "Included in group" : "Include photo",
+      included ? "active" : "",
+      () => {
+        toggleDetailPhoto(row);
+        renderViewer();
+      },
+    );
+    include.setAttribute("aria-pressed", String(included));
+    actions.append(
+      include,
+      button("Back to group", "quiet", () => $("viewer").close()),
+    );
+    return;
+  }
   if (view?.type === "album" && !view.petId) {
     (row.identities || []).forEach((identity) =>
       actions.append(
@@ -1271,28 +1293,49 @@ async function openDetail(group) {
   const data = await api("groups/" + group.id);
   detailGroup = { ...data, type: "group" };
   detailSelected = new Set(data.members.map((row) => row.id));
+  const photos = new Map();
+  data.members.forEach((row) => {
+    if (!photos.has(row.asset_id))
+      photos.set(row.asset_id, { ...row, assignment_ids: [] });
+    photos.get(row.asset_id).assignment_ids.push(row.id);
+  });
+  detailPhotos = [...photos.values()];
   $("detail-title").textContent = plural(data.photo_count, "similar photo");
   $("detail-grid").replaceChildren();
-  data.members.forEach((row) => {
-    const tile = button(
-      "",
-      "photo-tile selected",
-      () => {
-        if (detailSelected.has(row.id)) detailSelected.delete(row.id);
-        else detailSelected.add(row.id);
-        renderDetailSelection();
-      },
-      `Include ${row.name}`,
-    );
+  detailPhotos.forEach((row, index) => {
+    const tile = el("div", "photo-tile selected");
+    tile.tabIndex = 0;
+    tile.setAttribute("aria-label", `Include ${row.name}`);
+    tile.addEventListener("click", () => toggleDetailPhoto(row));
+    tile.addEventListener("keydown", (event) => {
+      if (event.target === tile && ["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        toggleDetailPhoto(row);
+      }
+    });
     tile.dataset.id = row.id;
     tile.setAttribute("role", "checkbox");
     tile.setAttribute("aria-checked", "true");
-    tile.append(image(row.id, row.name), el("span", "photo-check", "✓"));
+    tile.append(
+      photoImage(row, 640),
+      el("span", "photo-check", "✓"),
+      expandButton(
+        () => openViewer(detailPhotos, index, true),
+        `Open full photo ${row.name}`,
+      ),
+    );
     $("detail-grid").append(tile);
   });
   $("detail-grid").classList.add("selecting");
   renderDetailSelection();
   $("group-detail").showModal();
+}
+function toggleDetailPhoto(row) {
+  const included = row.assignment_ids.every((id) => detailSelected.has(id));
+  row.assignment_ids.forEach((id) =>
+    included ? detailSelected.delete(id) : detailSelected.add(id),
+  );
+  renderDetailSelection();
 }
 function renderDetailSelection() {
   $("detail-count").textContent =
@@ -1311,7 +1354,10 @@ function renderDetailSelection() {
   $("detail-grid")
     .querySelectorAll(".photo-tile")
     .forEach((tile) => {
-      const checked = detailSelected.has(tile.dataset.id);
+      const photo = detailPhotos.find((row) => row.id === tile.dataset.id);
+      const checked = photo.assignment_ids.every((id) =>
+        detailSelected.has(id),
+      );
       tile.classList.toggle("selected", checked);
       tile.setAttribute("aria-checked", String(checked));
       tile.querySelector(".photo-check").textContent = checked ? "✓" : "";

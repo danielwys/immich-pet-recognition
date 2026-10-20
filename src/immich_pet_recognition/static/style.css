@@ -857,6 +857,12 @@ main {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 6px;
 }
+.detail-grid .photo-tile > img {
+  object-fit: contain;
+}
+.detail-grid .photo-tile:not(.selected):hover > img {
+  transform: none;
+}
 .detail-actions {
   position: sticky;
   bottom: 0;
