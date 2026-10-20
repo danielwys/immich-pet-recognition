@@ -327,6 +327,7 @@ async function refreshStatus() {
     renderNavigation();
     updateAlbumCount();
     renderActivity();
+    renderConnection();
     if (view?.type === "activity") renderActivityPage();
   } finally {
     polling = false;
@@ -1488,21 +1489,7 @@ function renderSettings() {
   const connection = el("section", "settings-section");
   connection.append(el("h2", "", "Connection"));
   const dl = el("dl", "connection-grid");
-  [
-    [
-      "Immich",
-      status.immich_connected
-        ? "Connected"
-        : status.demo
-          ? "Demo mode"
-          : "Not connected",
-    ],
-    ["Recognition", status.provider || "—"],
-    ["Detection model", status.detector || "—"],
-    ["Identity model", status.recognizer || "—"],
-  ].forEach(([key, value]) =>
-    dl.append(el("dt", "", key), el("dd", "", value)),
-  );
+  dl.id = "connection-details";
   connection.append(dl);
   if (status.auth_required)
     connection.append(
@@ -1513,6 +1500,37 @@ function renderSettings() {
       }),
     );
   container.append(connection);
+  renderConnection();
+}
+function renderConnection() {
+  if (view?.type !== "settings") return;
+  const dl = $("connection-details");
+  if (!dl) return;
+  const ready = typeof status.immich_connected === "boolean";
+  dl.replaceChildren();
+  [
+    [
+      "Immich",
+      !ready
+        ? "Checking…"
+        : status.immich_connected
+          ? "Connected"
+          : status.demo
+            ? "Demo mode"
+            : "Not connected",
+    ],
+    ["Recognition", status.provider || (ready ? "Unavailable" : "Checking…")],
+    [
+      "Detection model",
+      status.detector || (ready ? "Unavailable" : "Checking…"),
+    ],
+    [
+      "Identity model",
+      status.recognizer || (ready ? "Unavailable" : "Checking…"),
+    ],
+  ].forEach(([key, value]) =>
+    dl.append(el("dt", "", key), el("dd", "", value)),
+  );
 }
 function renderActivityPage() {
   if (view?.type !== "activity") return;

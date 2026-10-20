@@ -8,9 +8,27 @@ function session() {
   const nodes = new Map(),
     storage = new Map(),
     errors = [];
-  function element() {
+  function element(tag = "div") {
     const classes = new Set();
+    let id,
+      text = "";
     return {
+      tagName: tag.toUpperCase(),
+      children: [],
+      get id() {
+        return id;
+      },
+      set id(value) {
+        id = value;
+        nodes.set(value, this);
+      },
+      get textContent() {
+        return text + this.children.map((child) => child.textContent).join("");
+      },
+      set textContent(value) {
+        text = String(value);
+        this.children = [];
+      },
       classList: {
         toggle(name, value) {
           if (value) classes.add(name);
@@ -27,8 +45,13 @@ function session() {
         },
       },
       addEventListener() {},
-      replaceChildren() {},
-      append() {},
+      replaceChildren(...children) {
+        text = "";
+        this.children = children;
+      },
+      append(...children) {
+        this.children.push(...children);
+      },
       querySelectorAll() {
         return [];
       },
@@ -89,18 +112,20 @@ function session() {
       if (phase === "bootstrap") return new Promise(() => {});
       if (url === "/api/status")
         return new Promise((resolve) => {
-          releaseStatus = () =>
+          releaseStatus = (body) =>
             resolve(
-              response({
-                undo_group: {
-                  id: "completed-group",
-                  pet_id: "pet",
-                  skip: false,
+              response(
+                body || {
+                  undo_group: {
+                    id: "completed-group",
+                    pet_id: "pet",
+                    skip: false,
+                  },
+                  recheck: { state: "complete" },
+                  review_summary: { pending_tag_changes: 0 },
+                  jobs: {},
                 },
-                recheck: { state: "complete" },
-                review_summary: { pending_tag_changes: 0 },
-                jobs: {},
-              }),
+              ),
             );
         });
       return Promise.resolve(
@@ -134,8 +159,8 @@ function session() {
     start() {
       phase = "responses";
     },
-    release() {
-      releaseStatus();
+    release(body) {
+      releaseStatus(body);
     },
   };
 }
@@ -165,5 +190,60 @@ test("a status response started before Undo cannot bring that completed action b
   assert.equal(vm.runInContext("lastUndo", app.context), null);
   assert.equal(app.storage.get("pet-dismissed-undo"), "completed-group");
   assert.equal(app.nodes.get("undo-bar").classList.contains("hidden"), true);
+  assert.deepEqual(app.errors, []);
+});
+
+test("connection details load and keep updating without clearing a Settings form", async () => {
+  const app = session();
+  app.start();
+  vm.runInContext("view={type:'settings'}; renderSettings();", app.context);
+  const details = app.nodes.get("connection-details");
+  const values = () =>
+    details.children
+      .filter((child) => child.tagName === "DD")
+      .map((child) => child.textContent);
+  assert.deepEqual(values(), [
+    "Checking…",
+    "Checking…",
+    "Checking…",
+    "Checking…",
+  ]);
+  function descendants(node) {
+    return [node, ...node.children.flatMap(descendants)];
+  }
+  const form = descendants(app.nodes.get("view")).find(
+    (node) => node.tagName === "FORM",
+  );
+  const name = descendants(form).find((node) => node.tagName === "INPUT");
+  name.value = "Still typing this name";
+  const healthy = {
+    immich_connected: true,
+    provider: "CUDAExecutionProvider",
+    detector: "open-noodle/rfdetr-nano",
+    recognizer: "open-noodle/pet-recognition-large",
+  };
+  let pending = vm.runInContext("refreshStatus()", app.context);
+  app.release(healthy);
+  await pending;
+  assert.deepEqual(values(), [
+    "Connected",
+    healthy.provider,
+    healthy.detector,
+    healthy.recognizer,
+  ]);
+  assert.equal(descendants(app.nodes.get("view")).includes(form), true);
+  assert.equal(name.value, "Still typing this name");
+
+  pending = vm.runInContext("refreshStatus()", app.context);
+  app.release({ ...healthy, immich_connected: false });
+  await pending;
+  assert.equal(values()[0], "Not connected");
+  assert.equal(descendants(app.nodes.get("view")).includes(form), true);
+  assert.equal(name.value, "Still typing this name");
+
+  pending = vm.runInContext("refreshStatus()", app.context);
+  app.release(healthy);
+  await pending;
+  assert.equal(values()[0], "Connected");
   assert.deepEqual(app.errors, []);
 });
