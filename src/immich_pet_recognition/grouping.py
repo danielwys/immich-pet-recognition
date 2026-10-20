@@ -47,6 +47,7 @@ def similar_groups(rows, similarity=0.8, maximum=200):
                     "members": members,
                     "crop_count": len(members),
                     "photo_count": len({row["asset_id"] for row in members}),
+                    "asset_ids": sorted({row["asset_id"] for row in members}),
                     "samples": [members[index] for index in samples],
                 }
             )

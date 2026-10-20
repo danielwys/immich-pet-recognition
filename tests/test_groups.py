@@ -119,12 +119,17 @@ def test_skip_undo_does_not_revert_unrelated_automatic_results(service):
 def test_stale_group_never_overwrites_a_human_decision(service):
     photos(service, 2)
     pet = service.add_pet("Rusty", "dog")
+    other = service.add_pet("Butter", "dog")
     group = service.groups()[0]
     first = group["members"][0]["id"]
-    service.decide(first, pet["id"], "confirmed", False)
-    with pytest.raises(ValueError, match="group changed"):
-        service.decide_group(group["id"], pet["id"], [])
-    assert service.store.one("SELECT count(*) n FROM reviews WHERE status='confirmed'")["n"] == 1
+    service.decide(first, other["id"], "confirmed", False)
+    result = service.decide_group(group["id"], pet["id"], [])
+    assert result["saved"] == result["skipped"] == 1
+    assert (
+        service.store.one("SELECT pet_id FROM reviews WHERE detection_id=?", (first,))["pet_id"]
+        == other["id"]
+    )
+    assert service.store.one("SELECT count(*) n FROM reviews WHERE status='confirmed'")["n"] == 2
 
 
 def test_undo_refuses_later_feedback_and_has_no_partial_effect(service):
@@ -169,7 +174,8 @@ def test_groups_api_collections_and_cross_origin_controls(service):
         ).json()
         service.publish_one()
         collection = client.get("/api/collections").json()[0]
-        assert collection["photo_count"] == 1 and collection["cover_id"]
+        assert collection["photo_count"] == 2 and collection["cover_id"]
+        assert collection["queued_count"] == 1
         assert client.post("/api/groups/undo/" + result["undo_id"]).status_code == 200
         assert client.post("/api/groups/undo/" + result["undo_id"]).status_code == 409
         assert (
@@ -223,15 +229,20 @@ def test_group_undo_refuses_a_replaced_asset_before_mutating_any_other_photo(ser
 
 def test_newly_scanned_pending_photos_invalidate_the_group_cache(service):
     photos(service, 2)
-    assert service.groups()[0]["photo_count"] == 2
+    original_group = service.groups()[0]
+    assert original_group["photo_count"] == 2
     original = service.immich.items[0]
     service.immich.items.append({**original, "id": str(uuid4())})
     service.sync()
     service.process_one()
-    assert service.groups()[0]["photo_count"] == 3
+    groups = service.groups()
+    assert sum(group["photo_count"] for group in groups) == 3
+    assert (
+        next(group for group in groups if group["id"] == original_group["id"])["photo_count"] == 2
+    )
 
 
-def test_a_published_photo_does_not_keep_asking_about_its_other_unassigned_animal(service):
+def test_a_named_photo_does_not_keep_asking_about_its_other_unassigned_animal(service):
     from immich_pet_recognition.models import Detection
 
     service.detector.items.append(Detection("dog", 0.9, (1, 1, 20, 20)))
@@ -240,6 +251,6 @@ def test_a_published_photo_does_not_keep_asking_about_its_other_unassigned_anima
     first = service.store.one("SELECT id FROM detections")["id"]
     service.decide(first, pet["id"], "confirmed")
     service.rematch()
-    assert service.groups()[0]["photo_count"] == 1
+    assert service.groups() == []  # Naming is immediate; publication is background sync.
     service.publish_one()
     assert service.groups() == []

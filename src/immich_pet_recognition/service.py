@@ -58,9 +58,18 @@ class Service:
         self.recheck_lock = threading.Lock()
         self.recheck = json.loads(self.store.state("last_recheck", "{}"))
         self.policy_lock = threading.RLock()
-        self.policy_cache = None
+        saved_policy = json.loads(self.store.state("last_matching_policy", "null"))
+        self.policy_cache = (
+            (tuple(saved_policy["key"]), saved_policy["policies"]) if saved_policy else None
+        )
         self.group_cache = None
         self.group_lock = threading.Lock()
+        self.group_snapshots = {}
+        self.review_generation = 0
+        self.publish_lock = threading.Lock()
+        self.active_publication = None
+        self.inference_lock = threading.RLock()
+        self.rematch_not_before = 0.0
         self.batch_depth = 0
         self.batch_gallery_dirty = False
 
@@ -74,6 +83,8 @@ class Service:
             if self.suggestions_pending():
                 self.rematch()
         elif self.settings.background:
+            if self.matching_options()["mode"] == "adaptive" and self.policy_cache is None:
+                self.gallery_changed()
             if self.suggestions_pending():
                 self.rematch_requested.set()
             self.worker = threading.Thread(target=self.run, name="pet-worker", daemon=True)
@@ -120,11 +131,11 @@ class Service:
         next_poll = 0.0
         while not self.stop_event.is_set():
             try:
-                if self.publish_one():
-                    continue
-                if self.rematch_requested.is_set():
+                if self.rematch_requested.is_set() and time.monotonic() >= self.rematch_not_before:
                     self.rematch_requested.clear()
                     self.rematch()
+                if self.publish_one():
+                    continue
                 if self.sync_requested.is_set() or time.monotonic() >= next_poll:
                     self.sync_requested.clear()
                     full = self.backfill_requested.is_set()
@@ -189,12 +200,11 @@ class Service:
         if job is None:
             return False
         try:
-            with self.model_lock:
-                asset = self.immich.asset(job["asset_id"])
-                if eligible(asset) and asset_revision(asset) == job["revision"]:
-                    self.process(job)
-                elif eligible(asset):
-                    self.store.enqueue(asset, asset_revision(asset), self.settings.pipeline_key)
+            asset = self.immich.asset(job["asset_id"])
+            if eligible(asset) and asset_revision(asset) == job["revision"]:
+                self.process(job)
+            elif eligible(asset):
+                self.store.enqueue(asset, asset_revision(asset), self.settings.pipeline_key)
             self.store.execute(
                 "UPDATE jobs SET status='completed',error=NULL WHERE id=?", (job["id"],)
             )
@@ -221,7 +231,8 @@ class Service:
             raw = self.immich.preview(job["asset_id"])
             with Image.open(io.BytesIO(raw)) as source:
                 image = ImageOps.exif_transpose(source).convert("RGB")
-            detections = self.detector.detect(image)
+            with self.inference_lock:
+                detections = self.detector.detect(image)
             entries = []
             for index, detection in enumerate(detections):
                 digest = hashlib.sha256(("|".join(key) + f"|{index}").encode()).hexdigest()[:32]
@@ -246,15 +257,17 @@ class Service:
             "SELECT * FROM detections WHERE asset_id=? AND revision=? AND detector=?", key
         ):
             self.embed(detection)
-            self.evaluate(detection)
+            with self.model_lock:
+                self.evaluate(detection)
 
     def embed(self, detection):
         vector = self.store.embedding(detection["id"], self.settings.recognizer_key)
         if vector is None:
             if self.settings.demo:
                 raise ValueError("Demo embeddings are unavailable for this crop")
-            with Image.open(self.crops / detection["crop"]) as crop:
-                vector = self.recognizer.embed(crop)
+            with self.inference_lock:
+                with Image.open(self.crops / detection["crop"]) as crop:
+                    vector = self.recognizer.embed(crop)
             self.store.save_embedding(detection["id"], self.settings.recognizer_key, vector)
         return vector
 
@@ -290,11 +303,11 @@ class Service:
             )
         )
 
-    def policies(self, gallery=None, mode=None, profile=None):
+    def policies(self, gallery=None, mode=None, profile=None, refresh=False, revision=None):
         options = self.matching_options()
         mode, profile = mode or options["mode"], profile or options["profile"]
         key = (
-            self.store.state("gallery_revision", "0"),
+            revision if revision is not None else self.store.state("gallery_revision", "0"),
             self.settings.recognizer_key,
             mode,
             profile,
@@ -305,28 +318,46 @@ class Service:
         with self.policy_lock:
             if self.policy_cache and self.policy_cache[0] == key:
                 return self.policy_cache[1]
-            if mode == "adaptive":
-                gallery = self.references(cached_only=True) if gallery is None else gallery
-                policies = fit_policies(
-                    gallery,
-                    self.settings.match_threshold,
-                    self.settings.match_margin,
-                    self.settings.min_references,
-                    profile,
-                )
-            else:
-                gallery = self.store.rows("SELECT id FROM pets") if gallery is None else gallery
-                policies = {
-                    pet["id"]: {
-                        "threshold": self.settings.match_threshold,
-                        "margin": self.settings.match_margin,
-                        "min_references": self.settings.min_references,
-                        "state": "fixed",
-                    }
-                    for pet in gallery
+            # Reads and human decisions never fit a new gallery. The worker can
+            # finish a fit while the page keeps using its last ready snapshot.
+            if not refresh and self.policy_cache and self.policy_cache[0][1:] == key[1:]:
+                return self.policy_cache[1]
+        if mode == "adaptive" and refresh:
+            gallery = self.references(cached_only=True) if gallery is None else gallery
+            policies = fit_policies(
+                gallery,
+                self.settings.match_threshold,
+                self.settings.match_margin,
+                self.settings.min_references,
+                profile,
+            )
+        else:
+            gallery = self.store.rows("SELECT id FROM pets") if gallery is None else gallery
+            policies = {
+                pet["id"]: {
+                    "threshold": min(self.settings.match_threshold, 0.75)
+                    if mode == "adaptive" and profile != "careful"
+                    else self.settings.match_threshold,
+                    "margin": min(self.settings.match_margin, 0.03)
+                    if mode == "adaptive" and profile != "careful"
+                    else self.settings.match_margin,
+                    "min_references": min(self.settings.min_references, 3)
+                    if mode == "adaptive"
+                    else self.settings.min_references,
+                    "state": "starting" if mode == "adaptive" else "fixed",
                 }
-            self.policy_cache = (key, policies)
-            return policies
+                for pet in gallery
+            }
+        if refresh or mode == "fixed":
+            with self.model_lock:
+                with self.policy_lock:
+                    if key[0] != self.store.state("gallery_revision", "0"):
+                        return policies
+                    self.policy_cache = (key, policies)
+                self.store.set_state(
+                    "last_matching_policy", json.dumps({"key": key, "policies": policies})
+                )
+        return policies
 
     def matching_preview(self, mode=None, profile=None):
         options = self.matching_options()
@@ -380,7 +411,7 @@ class Service:
             self.settings.match_threshold,
             self.settings.match_margin,
             self.settings.min_references,
-            self.policies(gallery),
+            self.policies(gallery, refresh=True),
         )
         automatic = result.confident and self.automation_enabled(result.pet_id)
         status = "confirmed" if automatic else "pending"
@@ -412,10 +443,9 @@ class Service:
         return bool(row["enabled"]) if row else self.settings.auto_tag
 
     def _review_changed(self, conn):
-        conn.execute(
-            "INSERT INTO state VALUES ('review_revision','1') ON CONFLICT(key) "
-            "DO UPDATE SET value=CAST(value AS INTEGER)+1"
-        )
+        # This only invalidates an in-memory cache; writing a durable counter
+        # for every crop made each background pass thousands of tiny writes.
+        self.review_generation += 1
         self.group_cache = None
 
     def pets(self):
@@ -480,6 +510,23 @@ class Service:
                     (pet_id, int(enabled)),
                 )
                 if not enabled:
+                    # A network write may be in flight outside the human lock.
+                    # Record its compensation before canceling the automatic name.
+                    if self.active_publication:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO tag_removals "
+                            "SELECT r.detection_id,r.model,d.asset_id,p.tag FROM reviews r "
+                            "JOIN detections d ON d.id=r.detection_id "
+                            "JOIN pets p ON p.id=r.pet_id JOIN automatic_reviews ar "
+                            "ON ar.detection_id=r.detection_id AND ar.model=r.model "
+                            "WHERE r.pet_id=? AND r.model=? AND r.status='confirmed' "
+                            "AND r.published=0 AND r.detection_id=?",
+                            (
+                                pet_id,
+                                self.settings.recognizer_key,
+                                self.active_publication["detection_id"],
+                            ),
+                        )
                     # Pause also cancels automatic writes that have not reached Immich.
                     conn.execute(
                         "UPDATE reviews SET status='pending',error=NULL WHERE pet_id=? "
@@ -495,6 +542,7 @@ class Service:
                         "AND r.status='pending')",
                         (pet_id,),
                     )
+                self._review_changed(conn)
             # Persisted revision makes an interrupted backlog recheck resume on restart.
             self.gallery_changed()
         return next(pet for pet in self.pets() if pet["id"] == pet_id)
@@ -524,6 +572,9 @@ class Service:
                 )
                 self._recheck_update(revision, total=len(detections))
                 gallery = self.references()
+            # Policy fitting is CPU work over a gallery snapshot. Keep it out
+            # of the human-decision lock, then validate the revision below.
+            self.policies(gallery, refresh=True, revision=revision)
             self._recheck_update(revision, state="running")
             automatic_matches = 0
             for index, detection in enumerate(detections):
@@ -625,6 +676,7 @@ class Service:
                     "error": "",
                 }
             self.rematch_requested.set()
+            self.rematch_not_before = time.monotonic() + 0.75
             self.wake_event.set()
             self.group_cache = None
         if self.settings.demo:
@@ -715,7 +767,9 @@ class Service:
             )
             self.gallery_changed()
 
-    def decide(self, detection_id, pet_id, status, learn=True, expected_pet_id=None):
+    def decide(
+        self, detection_id, pet_id, status, learn=True, expected_pet_id=None, expected_status=None
+    ):
         with self.model_lock:
             self.group_cache = None
             detection = self.store.one(
@@ -738,6 +792,8 @@ class Service:
             if row is None:
                 raise ValueError("This detection is not ready for review")
             if expected_pet_id is not None and row["pet_id"] != expected_pet_id:
+                raise ValueError("Assignment changed; refresh before correcting this photo")
+            if expected_status is not None and row["status"] != expected_status:
                 raise ValueError("Assignment changed; refresh before correcting this photo")
             changed = row["pet_id"] != pet_id or row["status"] != status
             gallery_updated = False
@@ -796,6 +852,15 @@ class Service:
                             (row["pet_id"], detection_id),
                         ).rowcount
                     )
+                if status == "pending" and row["pet_id"]:
+                    # Removing a name returns the photo to Unidentified and
+                    # teaches that the old identity was wrong.
+                    conn.execute(
+                        "INSERT INTO reference_images VALUES (?,?,'negative') "
+                        "ON CONFLICT(pet_id,detection_id) DO UPDATE SET kind='negative'",
+                        (row["pet_id"], detection_id),
+                    )
+                    gallery_updated = True
                 if learn and status == "confirmed":
                     # Only an explicit human assignment can teach the gallery.
                     conn.execute(
@@ -843,6 +908,7 @@ class Service:
                         item["status"],
                         item["learn"],
                         item.get("expected_pet_id"),
+                        item.get("expected_status"),
                     )
                     results.append({"id": item["detection_id"], "saved": True})
                 except ValueError as error:
@@ -852,11 +918,9 @@ class Service:
         return results
 
     def collections(self):
-        published = (
-            "r.status='confirmed'"
-            if self.settings.demo
-            else "r.status='confirmed' AND r.published=1"
-        )
+        # Albums describe current names. Immich publication is background sync,
+        # and must not make a newly named photo disappear until the network finishes.
+        published = "r.status='confirmed'"
         counts = {
             row["pet_id"]: row
             for row in self.store.rows(
@@ -884,27 +948,27 @@ class Service:
         ]
 
     def groups(self):
-        if self.suggestions_pending():
-            return None
+        """Actionable snapshots stay on screen while background suggestions change.
+
+        Membership is stable for a session; a fresh score never invalidates a
+        user's selection. Submission still checks each current review so an
+        automatic match or another person's decision cannot be overwritten.
+        """
         model = self.settings.recognizer_key
 
         def signature():
-            return (
-                self.store.state("gallery_revision", "0"),
-                self.store.state("review_revision", "0"),
-                model,
-                self.settings.detector_key,
-            )
+            return (self.review_generation, model, self.settings.detector_key)
 
-        revision = signature()
-        with self.group_lock:
-            if self.group_cache and self.group_cache[0] == revision:
-                return self.group_cache[1]
+        with self.model_lock:
+            revision = signature()
+            with self.group_lock:
+                if self.group_cache and self.group_cache[0] == revision:
+                    return self.group_cache[1]
             rows = self.store.rows(
                 "WITH tagged AS MATERIALIZED (SELECT DISTINCT d.asset_id FROM reviews r "
                 "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
                 "WHERE r.model=? AND d.detector=? AND d.revision=a.revision "
-                + ("AND r.status='confirmed' " if self.settings.demo else "AND r.published=1 ")
+                + "AND r.status='confirmed' "
                 + "UNION SELECT asset_id FROM tag_removals) "
                 "SELECT d.id,d.asset_id,d.species,a.name,r.pet_id,r.score,r.margin,e.vector "
                 "FROM reviews r JOIN detections d ON d.id=r.detection_id "
@@ -914,13 +978,56 @@ class Service:
                 "WHERE t.asset_id=d.asset_id) ORDER BY r.score DESC,d.id",
                 (model, self.settings.detector_key, model, self.settings.detector_key),
             )
-            for row in rows:
+        with self.group_lock:
+            current = {row["id"]: row for row in rows}
+            if self.group_snapshots.get("pipeline") != (model, self.settings.detector_key):
+                self.group_snapshots = {"pipeline": (model, self.settings.detector_key)}
+            snapshots = self.group_snapshots.setdefault("items", {})
+            now = time.monotonic()
+            # Bounded, temporary selection snapshots, not a history of labels.
+            snapshots = {key: value for key, value in snapshots.items() if now - value[0] < 3600}
+            self.group_snapshots["items"] = snapshots
+            tracked = {
+                member["id"] for _, group in snapshots.values() for member in group["members"]
+            }
+            unseen = [row for row in rows if row["id"] not in tracked]
+            for row in unseen:
                 row["vector"] = np.frombuffer(row["vector"], dtype=np.float32)
-            groups = similar_groups(rows)
+            for group in similar_groups(unseen):
+                snapshots[group["id"]] = (now, group)
             names = {pet["id"]: pet["name"] for pet in self.store.rows("SELECT id,name FROM pets")}
-            for group in groups:
-                group["pet_name"] = names.get(group["pet_id"])
-            if revision == signature() and not self.suggestions_pending():
+            groups = []
+            for _, snapshot in snapshots.values():
+                members = [
+                    current[member["id"]]
+                    for member in snapshot["members"]
+                    if member["id"] in current
+                ]
+                if not members:
+                    continue
+                members = [{k: v for k, v in row.items() if k != "vector"} for row in members]
+                # A suggestion may change, but the selected photo set and ID do not.
+                choices = {}
+                for member in members:
+                    choices[member["pet_id"]] = choices.get(member["pet_id"], 0) + 1
+                pet_id = max(choices, key=choices.get)
+                indexes = sorted(
+                    set([0, len(members) // 3, 2 * len(members) // 3, len(members) - 1])
+                )
+                groups.append(
+                    {
+                        **snapshot,
+                        "pet_id": pet_id,
+                        "pet_name": names.get(pet_id),
+                        "members": members,
+                        "crop_count": len(members),
+                        "photo_count": len({row["asset_id"] for row in members}),
+                        "asset_ids": sorted({row["asset_id"] for row in members}),
+                        "samples": [members[index] for index in indexes],
+                    }
+                )
+            groups.sort(key=lambda group: (-group["photo_count"], group["id"]))
+            if revision == signature():
                 self.group_cache = (revision, groups)
             return groups
 
@@ -931,55 +1038,125 @@ class Service:
         )
 
     def decide_group(self, group_id, pet_id, excluded, skip=False):
-        groups = self.groups()
-        group = next((item for item in groups or [] if item["id"] == group_id), None)
-        if not group:
-            raise ValueError("This group changed. Refresh to see the current photos.")
-        ids = {member["id"] for member in group["members"]}
-        if not set(excluded) <= ids:
-            raise ValueError("An excluded photo is not in this group")
-        members = [member for member in group["members"] if member["id"] not in excluded]
-        if not members:
+        return self.decide_groups([group_id], pet_id, skip, {group_id: excluded})
+
+    def decide_groups(self, group_ids, pet_id, skip=False, excluded=None):
+        self.groups()
+        excluded = excluded or {}
+        ids = set()
+        with self.group_lock:
+            snapshots = self.group_snapshots.get("items", {})
+            for group_id in group_ids:
+                entry = snapshots.get(group_id)
+                if entry is None:
+                    raise ValueError("This selection expired. Refresh to see the current photos.")
+                members = {row["id"] for row in entry[1]["members"]}
+                omitted = set(excluded.get(group_id, []))
+                if not omitted <= members:
+                    raise ValueError("An excluded photo is not in this group")
+                ids.update(members - omitted)
+        if not ids:
             raise ValueError("Select at least one photo")
-        if not skip and not self.store.one("SELECT id FROM pets WHERE id=?", (pet_id,)):
-            raise ValueError("Choose a pet")
+        if len(ids) > 5000:
+            raise ValueError("Select up to 5,000 photos at a time")
         with self.model_lock:
-            before = []
-            for member in members:
-                row = self.store.one(
-                    "SELECT r.*,d.species,d.asset_id FROM reviews r JOIN detections d "
-                    "ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
-                    "WHERE d.id=? AND r.model=? AND d.detector=? AND d.revision=a.revision",
-                    (member["id"], self.settings.recognizer_key, self.settings.detector_key),
-                )
-                if row is None or row["status"] != "pending":
-                    raise ValueError(
-                        "A photo was already assigned. Refresh this group before changing it."
+            pet = None if skip else self.store.one("SELECT * FROM pets WHERE id=?", (pet_id,))
+            if not skip and not pet:
+                raise ValueError("Choose a pet")
+            selected = json.dumps(sorted(ids))
+            # One transaction for the whole human action, even across many clusters.
+            # Changed or automatically handled rows are skipped, never overwritten.
+            with self.store.connection() as conn:
+                before = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT r.*,d.species,d.asset_id FROM reviews r JOIN detections d "
+                        "ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+                        "WHERE d.id IN (SELECT value FROM json_each(?)) AND r.model=? "
+                        "AND d.detector=? AND d.revision=a.revision AND r.status='pending'",
+                        (selected, self.settings.recognizer_key, self.settings.detector_key),
                     )
-                before.append({**row, "references": self._references_for(member["id"])})
-            results = self.bulk_decide(
-                [
-                    {
-                        "detection_id": row["detection_id"],
-                        "pet_id": None if skip else pet_id,
-                        "status": "rejected" if skip else "confirmed",
-                        "learn": not skip,
-                    }
-                    for row in before
                 ]
-            )
-            if skip:
-                with self.store.connection() as conn:
-                    for row in before:
+                if not before:
+                    raise ValueError(
+                        "These photos have already been handled. "
+                        "Your other selections are still available."
+                    )
+                references = {}
+                for ref in conn.execute(
+                    "SELECT * FROM reference_images WHERE detection_id IN "
+                    "(SELECT value FROM json_each(?)) ORDER BY pet_id,kind",
+                    (selected,),
+                ):
+                    references.setdefault(ref["detection_id"], []).append(
+                        {"pet_id": ref["pet_id"], "kind": ref["kind"]}
+                    )
+                for row in before:
+                    detection_id = row["detection_id"]
+                    row["references"] = references.get(detection_id, [])
+                    if not skip and pet["species"] != row["species"]:
+                        conn.execute(
+                            "UPDATE detections SET species=? WHERE id=?",
+                            (pet["species"], detection_id),
+                        )
+                        conn.execute(
+                            "DELETE FROM reference_images WHERE detection_id=? AND pet_id IN "
+                            "(SELECT id FROM pets WHERE species<>?)",
+                            (detection_id, pet["species"]),
+                        )
+                    conn.execute(
+                        "DELETE FROM automatic_reviews WHERE detection_id=? AND model=?",
+                        (detection_id, self.settings.recognizer_key),
+                    )
+                    conn.execute(
+                        "DELETE FROM automatic_sources WHERE detection_id=? AND model=?",
+                        (detection_id, self.settings.recognizer_key),
+                    )
+                    conn.execute(
+                        "UPDATE reviews SET pet_id=?,status=?,published=0,error=NULL "
+                        "WHERE detection_id=? AND model=?",
+                        (
+                            None if skip else pet_id,
+                            "rejected" if skip else "confirmed",
+                            detection_id,
+                            self.settings.recognizer_key,
+                        ),
+                    )
+                    if skip:
                         conn.execute(
                             "INSERT INTO reference_images SELECT id,?,'negative' FROM pets "
                             "WHERE species=? ON CONFLICT(pet_id,detection_id) "
                             "DO UPDATE SET kind='negative'",
-                            (row["detection_id"], row["species"]),
+                            (detection_id, row["species"]),
                         )
-                self.gallery_changed()
-            for row in before:
-                row["after_references"] = self._references_for(row["detection_id"])
+                    else:
+                        conn.execute(
+                            "DELETE FROM reference_images WHERE detection_id=? "
+                            "AND kind='positive' AND pet_id<>?",
+                            (detection_id, pet_id),
+                        )
+                        conn.execute(
+                            "INSERT INTO reference_images VALUES (?,?,'positive') "
+                            "ON CONFLICT(pet_id,detection_id) DO UPDATE SET kind='positive'",
+                            (pet_id, detection_id),
+                        )
+                        if row["pet_id"] and row["pet_id"] != pet_id:
+                            conn.execute(
+                                "INSERT INTO reference_images SELECT id,?,'negative' FROM pets "
+                                "WHERE id=? AND species=? ON CONFLICT(pet_id,detection_id) "
+                                "DO UPDATE SET kind='negative'",
+                                (detection_id, row["pet_id"], pet["species"]),
+                            )
+                    row["after_references"] = [
+                        dict(ref)
+                        for ref in conn.execute(
+                            "SELECT pet_id,kind FROM reference_images WHERE detection_id=? "
+                            "ORDER BY pet_id,kind",
+                            (detection_id,),
+                        )
+                    ]
+                self._review_changed(conn)
+            self.gallery_changed()
             action = {
                 "id": uuid.uuid4().hex,
                 "pet_id": pet_id,
@@ -989,8 +1166,12 @@ class Service:
                 "created_at": datetime.now(UTC).isoformat(),
             }
             self.store.set_state("last_group_action", json.dumps(action))
-            self.group_cache = None
-            return {"saved": sum(row["saved"] for row in results), "undo_id": action["id"]}
+            return {
+                "saved": len(before),
+                "skipped": len(ids) - len(before),
+                "photos": len({row["asset_id"] for row in before}),
+                "undo_id": action["id"],
+            }
 
     def undo_info(self):
         action = json.loads(self.store.state("last_group_action", "null"))
@@ -1008,79 +1189,131 @@ class Service:
         }
 
     def undo_group(self, action_id):
-        info = self.undo_info()
-        if info is None or info["id"] != action_id:
-            raise ValueError(
-                "This undo is no longer available. Correct tags in the pet collection."
-            )
-        action = json.loads(self.store.state("last_group_action"))
         with self.model_lock:
-            for old in action["rows"]:
-                current = self.store.one(
-                    "SELECT r.* FROM reviews r JOIN detections d ON d.id=r.detection_id "
-                    "JOIN assets a ON a.id=d.asset_id WHERE d.id=? AND r.model=? "
-                    "AND d.detector=? AND d.revision=a.revision",
-                    (old["detection_id"], self.settings.recognizer_key, self.settings.detector_key),
+            info = self.undo_info()
+            if info is None or info["id"] != action_id:
+                raise ValueError(
+                    "This undo is no longer available. Correct tags in the pet collection."
                 )
-                expected_status = "rejected" if action["skip"] else "confirmed"
-                if (
-                    not current
-                    or current["status"] != expected_status
-                    or current["pet_id"] != (None if action["skip"] else action["pet_id"])
-                    or self._references_for(old["detection_id"]) != old["after_references"]
-                ):
-                    raise ValueError(
-                        "A photo in this group changed. Correct it in the pet collection."
+            action = json.loads(self.store.state("last_group_action"))
+            selected = json.dumps([row["detection_id"] for row in action["rows"]])
+            with self.store.connection() as conn:
+                current = {
+                    row["detection_id"]: dict(row)
+                    for row in conn.execute(
+                        "SELECT r.* FROM reviews r JOIN detections d ON d.id=r.detection_id "
+                        "JOIN assets a ON a.id=d.asset_id WHERE d.id IN "
+                        "(SELECT value FROM json_each(?)) AND r.model=? "
+                        "AND d.detector=? AND d.revision=a.revision",
+                        (selected, self.settings.recognizer_key, self.settings.detector_key),
                     )
-            # Undo automatic results caused by this group's teaching as well.
-            propagated = self.store.rows(
-                "SELECT r.* FROM reviews r JOIN detections d ON d.id=r.detection_id "
-                "JOIN assets a ON a.id=d.asset_id JOIN automatic_sources src "
-                "ON src.detection_id=r.detection_id AND src.model=r.model "
-                "JOIN automatic_reviews ar ON ar.detection_id=r.detection_id "
-                "AND ar.model=r.model "
-                "WHERE src.revision=? AND r.model=? AND r.status='confirmed' "
-                "AND d.detector=? AND d.revision=a.revision",
-                (action["revision"], self.settings.recognizer_key, self.settings.detector_key),
-            )
-            with self.batch_updates():
-                for row in [*action["rows"], *propagated]:
-                    self.decide(row["detection_id"], None, "rejected", False)
-                    with self.store.connection() as conn:
+                }
+                references = {}
+                for ref in conn.execute(
+                    "SELECT * FROM reference_images WHERE detection_id IN "
+                    "(SELECT value FROM json_each(?)) ORDER BY pet_id,kind",
+                    (selected,),
+                ):
+                    references.setdefault(ref["detection_id"], []).append(
+                        {"pet_id": ref["pet_id"], "kind": ref["kind"]}
+                    )
+                for old in action["rows"]:
+                    row = current.get(old["detection_id"])
+                    if (
+                        not row
+                        or row["status"] != ("rejected" if action["skip"] else "confirmed")
+                        or row["pet_id"] != (None if action["skip"] else action["pet_id"])
+                        or references.get(old["detection_id"], []) != old["after_references"]
+                    ):
+                        raise ValueError(
+                            "A photo in this group changed. Correct it in the pet collection."
+                        )
+                # Only automatic assignments still owned by this teaching pass
+                # are reverted. A later explicit name has removed that marker.
+                propagated = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT r.*,d.asset_id FROM reviews r JOIN detections d "
+                        "ON d.id=r.detection_id "
+                        "JOIN assets a ON a.id=d.asset_id JOIN automatic_sources src "
+                        "ON src.detection_id=r.detection_id AND src.model=r.model "
+                        "JOIN automatic_reviews ar ON ar.detection_id=r.detection_id "
+                        "AND ar.model=r.model "
+                        "WHERE src.revision=? AND r.model=? AND r.status='confirmed' "
+                        "AND d.detector=? AND d.revision=a.revision",
+                        (
+                            action["revision"],
+                            self.settings.recognizer_key,
+                            self.settings.detector_key,
+                        ),
+                    )
+                ]
+                tags = {row["id"]: row["tag"] for row in conn.execute("SELECT id,tag FROM pets")}
+                for old in [*action["rows"], *propagated]:
+                    row = current[old["detection_id"]] if "references" in old else old
+                    if row["status"] == "confirmed" and row["pet_id"] and not self.settings.demo:
+                        # Required even for unpublished rows: an HTTP tag write
+                        # may be in flight while the user presses Undo.
                         conn.execute(
-                            "UPDATE reviews SET pet_id=?,status='pending',score=?,margin=? "
-                            "WHERE detection_id=? AND model=?",
+                            "INSERT OR IGNORE INTO tag_removals VALUES (?,?,?,?)",
                             (
-                                row.get("pet_id") if "references" in row else None,
-                                row["score"],
-                                row["margin"],
-                                row["detection_id"],
+                                old["detection_id"],
                                 self.settings.recognizer_key,
+                                old["asset_id"],
+                                tags[row["pet_id"]],
                             ),
                         )
-                        if "references" in row:
-                            conn.execute(
-                                "UPDATE detections SET species=? WHERE id=?",
-                                (row["species"], row["detection_id"]),
-                            )
-                            conn.execute(
-                                "DELETE FROM reference_images WHERE detection_id=?",
-                                (row["detection_id"],),
-                            )
-                            conn.executemany(
-                                "INSERT INTO reference_images VALUES (?,?,?)",
-                                [
-                                    (ref["pet_id"], row["detection_id"], ref["kind"])
-                                    for ref in row["references"]
-                                ],
-                            )
-                self.gallery_changed()
-            self.store.set_state("last_group_action", "null")
-            self.group_cache = None
+                    conn.execute(
+                        "DELETE FROM automatic_reviews WHERE detection_id=? AND model=?",
+                        (old["detection_id"], self.settings.recognizer_key),
+                    )
+                    conn.execute(
+                        "DELETE FROM automatic_sources WHERE detection_id=? AND model=?",
+                        (old["detection_id"], self.settings.recognizer_key),
+                    )
+                    conn.execute(
+                        "UPDATE reviews SET pet_id=?,status='pending',published=0,error=NULL,"
+                        "score=?,margin=? "
+                        "WHERE detection_id=? AND model=?",
+                        (
+                            old.get("pet_id") if "references" in old else None,
+                            old["score"],
+                            old["margin"],
+                            old["detection_id"],
+                            self.settings.recognizer_key,
+                        ),
+                    )
+                    if "references" in old:
+                        conn.execute(
+                            "UPDATE detections SET species=? WHERE id=?",
+                            (old["species"], old["detection_id"]),
+                        )
+                        conn.execute(
+                            "DELETE FROM reference_images WHERE detection_id=?",
+                            (old["detection_id"],),
+                        )
+                        conn.executemany(
+                            "INSERT INTO reference_images VALUES (?,?,?)",
+                            [
+                                (ref["pet_id"], old["detection_id"], ref["kind"])
+                                for ref in old["references"]
+                            ],
+                        )
+                    elif row["pet_id"]:
+                        conn.execute(
+                            "DELETE FROM reference_images WHERE pet_id=? AND detection_id=? "
+                            "AND kind='positive'",
+                            (row["pet_id"], old["detection_id"]),
+                        )
+                self._review_changed(conn)
+                conn.execute("INSERT OR REPLACE INTO state VALUES ('last_group_action','null')")
+            self.gallery_changed()
             return {"restored": len(action["rows"]), "automatic_restored": len(propagated)}
 
     def publish_one(self):
-        with self.model_lock:
+        # Only the publisher is serialized across network calls. Human naming
+        # remains available even when Immich is taking its full HTTP timeout.
+        with self.publish_lock:
             return self._publish_one() or self._remove_one()
 
     def _apply_tag_removals(self, row, asset):
@@ -1105,16 +1338,40 @@ class Service:
                 self.immich.untag(row["asset_id"], removal["tag"], asset)
 
     def _finish_tag_change(self, row, published):
-        with self.store.connection() as conn:
-            conn.execute(
-                "DELETE FROM tag_removals WHERE detection_id=? AND model=?",
-                (row["detection_id"], row["model"]),
-            )
-            conn.execute(
-                "UPDATE reviews SET published=?,error=NULL WHERE detection_id=? AND model=?",
-                (published, row["detection_id"], row["model"]),
-            )
-            self._review_changed(conn)
+        with self.model_lock:
+            if not self._current_tag_operation(row):
+                # A newer decision already queued the compensating removal or
+                # publication. Do not clear its debt or mark it published.
+                return
+            with self.store.connection() as conn:
+                conn.execute(
+                    "DELETE FROM tag_removals WHERE detection_id=? AND model=?",
+                    (row["detection_id"], row["model"]),
+                )
+                conn.execute(
+                    "UPDATE reviews SET published=?,error=NULL WHERE detection_id=? AND model=?",
+                    (published, row["detection_id"], row["model"]),
+                )
+                self._review_changed(conn)
+
+    def _current_tag_operation(self, row):
+        current = self.store.one(
+            "SELECT r.pet_id,r.status,r.published,d.revision FROM reviews r "
+            "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+            "WHERE r.detection_id=? AND r.model=? AND d.detector=? AND d.revision=a.revision",
+            (row["detection_id"], row["model"], self.settings.detector_key),
+        )
+        return current and all(
+            current[key] == row[key] for key in ("pet_id", "status", "published", "revision")
+        )
+
+    def _tag_change_failed(self, row, error):
+        with self.model_lock:
+            if self._current_tag_operation(row):
+                self.store.execute(
+                    "UPDATE reviews SET error=? WHERE detection_id=? AND model=?",
+                    (self.safe_error(error), row["detection_id"], row["model"]),
+                )
 
     def _remove_one(self):
         if self.settings.demo:
@@ -1139,10 +1396,7 @@ class Service:
             self._apply_tag_removals(row, asset)
             self._finish_tag_change(row, 0)
         except Exception as error:
-            self.store.execute(
-                "UPDATE reviews SET error=? WHERE detection_id=? AND model=?",
-                (self.safe_error(error), row["detection_id"], row["model"]),
-            )
+            self._tag_change_failed(row, error)
         return True
 
     def _publish_one(self):
@@ -1156,27 +1410,26 @@ class Service:
         if row is None or self.settings.demo:
             return False
         with self.model_lock:
-            # Refresh under the decision lock: a rejection must win over queued publication.
-            current = self.store.one(
-                "SELECT status FROM reviews WHERE detection_id=? AND model=?",
-                (row["detection_id"], row["model"]),
-            )
-            if current["status"] != "confirmed":
+            if not self._current_tag_operation(row):
                 return True
-            try:
-                asset = self.immich.asset(row["asset_id"])
-                if not eligible(asset) or asset_revision(asset) != row["revision"]:
-                    raise ValueError("Asset changed or is unavailable; resync before publishing")
-                if self.stop_event.is_set():
-                    return False
-                self.immich.tag(row["asset_id"], row["tag"])
-                self._apply_tag_removals(row, asset)
-                self._finish_tag_change(row, 1)
-            except Exception as error:
-                self.store.execute(
-                    "UPDATE reviews SET error=? WHERE detection_id=? AND model=?",
-                    (self.safe_error(error), row["detection_id"], row["model"]),
-                )
+            self.active_publication = row
+        try:
+            asset = self.immich.asset(row["asset_id"])
+            if not eligible(asset) or asset_revision(asset) != row["revision"]:
+                raise ValueError("Asset changed or is unavailable; resync before publishing")
+            if self.stop_event.is_set():
+                return False
+            with self.model_lock:
+                if not self._current_tag_operation(row):
+                    return True
+            self.immich.tag(row["asset_id"], row["tag"])
+            self._apply_tag_removals(row, asset)
+            self._finish_tag_change(row, 1)
+        except Exception as error:
+            self._tag_change_failed(row, error)
+        finally:
+            with self.model_lock:
+                self.active_publication = None
         return True
 
     def retry_failed(self):

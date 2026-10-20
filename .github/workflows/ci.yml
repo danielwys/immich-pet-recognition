@@ -10,6 +10,9 @@ jobs:
           version: "0.12.19"
       - run: uv sync --locked --extra cpu --python 3.12
       - run: uv run pytest
+      - run: node --test tests/frontend/*.test.cjs
+      - run: node --check src/immich_pet_recognition/static/app.js
+      - run: uv run python scripts/benchmark_review.py --check
       - run: uv run ruff check .
       - run: uv run ruff format --check .
   container:

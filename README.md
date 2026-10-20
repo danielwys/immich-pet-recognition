@@ -12,8 +12,8 @@ Newly named pets sort automatically; existing saved pause choices are preserved.
 - Incremental API polling and an existing-library scan.
 - RF-DETR Nano detection and Open Noodle Pet Recognition Large ONNX embeddings.
 - Separate, versioned detection and embedding caches; recognition changes reuse crops.
-- Pet collections, learned matching policies, and groups of similar photos to review together.
-- Pet collections, compact group review, and idempotent `Pets/<name>` tag writeback.
+- Pet albums, learned matching policies, and batch naming of unidentified photos.
+- Idempotent `Pets/<name>` tag writeback, with corrections and durable retries.
 - No direct Immich database access. Stock Immich human recognition continues independently.
 
 Video, pet entries in People, workflow event hooks, and model ensembles are future work. It is a single-instance service for one Immich account.
@@ -76,42 +76,43 @@ also use its smart search/human-face detection; GPU memory is shared with this s
 
 6. Name your pets and scan the library. Automatic sorting is on for newly registered pets.
    Confirm a group when the identity is uncertain; every identification helps future sorting.
-   Open a pet collection to correct or remove a tag. Failed writes can be retried in Processing.
+   Open a pet collection to correct or remove a tag. Failed writes can be retried in Background activity.
 
 The first real scan downloads pinned model weights from Hugging Face. RF-DETR Nano is small;
 the Large recognizer is approximately 1.2 GB. Models run locally after download. The CUDA
 runtime refuses silent CPU fallback if the requested provider fails to initialize.
 
-## Pet collections and group review
+## Your pet library
 
-The home screen shows your pets and their collections, including how many photos were sorted
-automatically. Clear matches are tagged without individual confirmation. Matches waiting to sync
-to Immich are shown separately. The app learns from every manual name or correction; there is
-no reference checkbox, enrollment action, or training/validation choice. Older manual names are
-adopted automatically. Automatic results never teach themselves; confirming or correcting one does.
+**Library** opens with pet portraits and photo previews. Open an album to browse its **Photos**:
+manual and automatic identities appear together, without confirmation buttons on every image.
+Select incorrect results to move them to another pet or remove their name. Removing a name
+retains the photo. The correct tag is added before an old tag is removed; a tag stays if another
+confirmed animal in the same photo needs it. Manual naming also corrects a wrong cat/dog label.
 
-**Review groups** shows compact sets of similar photos. One answer names the whole group. Use
-**Review / remove exceptions** to uncheck photos that do not belong, then choose the pet; unchecked
-photos stay for later. Groups have a similarity bound between every pair of members, rather than
-chaining unrelated photos through intermediate matches. **Not one of my pets** excludes a group
-and uses that feedback to avoid similar mistakes. **Undo group** restores the latest group change
-and the automatic results from the pass it triggered. It survives restart for one hour; later edits
-to that group's identities or feedback prevent undo from overwriting newer work.
+An album's **More photos** tab brings plausible additional matches into that pet's context.
+Select exceptions and use **Add remaining photos** to add the rest of the displayed candidates
+in one action, including candidates from several internal similarity groups. Exceptions remain
+unidentified. Suggestions are separate from completed album members until added.
 
-Open a pet collection to see its completed manual and automatic tags. Select photos to change
-their identity or remove their tags. The correct tag is added before an old tag is removed; a tag
-stays if another confirmed animal in the same photo needs it. Manual naming also corrects a wrong
-cat/dog detection label. Removing a tag retains the photo. Failed tag changes remain visible and
-can be retried in Processing; pending removals survive restart and are verified against Immich.
+**Unidentified** is a visual contact sheet of similar photos. Select several groups and name them
+together using the fixed assignment bar, rather than answering the same pet question for each
+group. Open a group to inspect its members when needed. Photos that cannot yet be identified
+can stay here; there is no requirement to clear a review queue before enjoying the albums.
 
-**All photos** retains the detailed Untagged/Tagged views. Tagged contains current completed
-assignments only, with no unrelated suggestions from other animal crops in the same photo.
-More filters offers manual/automatic source, skipped photos, and additional unassigned animals
-inside already-tagged photos. Counters distinguish unique photos from animal crops.
+Naming and correction update the interface while recognition and Immich tag sync run in the
+background. The current gallery stays available during sorting. Undo is available for the latest
+batch action, and a small activity indicator opens progress and retry details. Failed writes and
+pending removals survive restart.
+
+Every manual name or correction improves recognition automatically, including older names.
+There is no reference checkbox, enrollment step, or training/validation choice. Automatic results
+never teach themselves. See [the product design contract](docs/design.md) for the workflow and
+the reasons behind it.
 
 ## Automatic sorting
 
-**Sorting settings** offers **Fewer mistakes**, **Balanced**, and **Sort more**, plus per-pet
+**Settings** offers **Fewer mistakes**, **Balanced**, and **Sort more**, plus per-pet
 pause controls. Preferences persist without a restart. A paused pet keeps its existing tags;
 unpublished automatic writes are canceled, while human assignments remain queued for publication.
 New pets default to automatic sorting on. Existing saved pause choices are preserved.
@@ -123,13 +124,13 @@ without confusing them. Well separated identities use the observed gap between t
 ranges instead of requiring near-duplicate similarity. The preferences change how much separation
 and past-label precision the search requires. The report describes checks on previous feedback;
 it is not a calibrated probability or a guarantee of accuracy on unseen animals. Contradictory
-identities remain for group review. The pretrained image encoder itself is not retrained.
+identities remain unidentified. The pretrained image encoder itself is not retrained.
 
-Matching uses cached embeddings, without downloading photos or rerunning detection. The status
-above the collections shows queued/preparing/running percentage, checked/total crops, completion,
-and errors with retry. Percentage measures the current pass, not the proportion of photos tagged.
-Tag syncing is tracked separately. Interrupted passes recover on restart, and human decisions
-are never overwritten by rematching. Only the latest completed progress record is retained.
+Matching uses cached embeddings, without downloading photos or rerunning detection. Activity
+details show queued/preparing/running percentage, checked/total crops, completion, and errors
+with retry. Percentage measures the current pass, not the proportion of photos tagged. Tag
+syncing is tracked separately. Interrupted passes recover on restart, and human decisions are
+never overwritten by rematching. Only the latest completed progress record is retained.
 
 `PET_MATCHING_MODE=adaptive` is the default. The read-only `/api/matching` report can preview a
 mode or preference before activation; `PUT /api/matching` saves the preference and rechecks the
@@ -162,7 +163,8 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-See [architecture](docs/architecture.md) and [validation](docs/validation.md).
+See [product design](docs/design.md), [architecture](docs/architecture.md), and
+[validation](docs/validation.md).
 
 For a real model smoke check on a local photo, without connecting to Immich:
 
@@ -172,7 +174,7 @@ uv run --extra cpu python scripts/smoke_models.py /path/to/dog-photo.jpg
 python scripts/smoke_models.py /path/to/dog-photo.jpg --cuda
 ```
 
-![Companion review UI with synthetic demo illustrations](docs/review-preview.jpg)
+![Photo library interface with synthetic demo illustrations](docs/library-preview.png)
 
 ## Model sources
 

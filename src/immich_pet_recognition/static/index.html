@@ -2,387 +2,218 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Immich Pet Recognition</title>
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#ffffff" />
+    <title>Pets · Immich</title>
     <link rel="stylesheet" href="/static/style.css" />
+    <script src="/static/action-queue.js" defer></script>
     <script src="/static/app.js" defer></script>
   </head>
   <body>
-    <aside class="sidebar">
-      <a class="brand" href="/"
-        ><span class="brand-icon" aria-hidden="true">✦</span
-        ><span>Pet recognition<small>FOR YOUR IMMICH LIBRARY</small></span></a
+    <header class="app-header">
+      <a class="brand" href="#library"
+        ><span class="brand-mark" aria-hidden="true"
+          ><svg viewBox="0 0 32 32" width="29" height="29" aria-hidden="true">
+            <ellipse
+              cx="6.5"
+              cy="12"
+              rx="3.5"
+              ry="4.7"
+              fill="currentColor"
+              transform="rotate(-22 6.5 12)"
+            />
+            <ellipse
+              cx="13"
+              cy="6.8"
+              rx="3.4"
+              ry="4.6"
+              fill="currentColor"
+              transform="rotate(-8 13 6.8)"
+            />
+            <ellipse
+              cx="21"
+              cy="7.5"
+              rx="3.5"
+              ry="4.6"
+              fill="currentColor"
+              transform="rotate(14 21 7.5)"
+            />
+            <ellipse
+              cx="27"
+              cy="13.5"
+              rx="3.2"
+              ry="4.4"
+              fill="currentColor"
+              transform="rotate(27 27 13.5)"
+            />
+            <path
+              d="M8 23c0-4 5-9 8-9s8 5 8 9c0 5-4 5-8 3-4 2-8 2-8-3Z"
+              fill="currentColor"
+            /></svg></span
+        >Pets<span class="brand-byline">for Immich</span></a
       >
-      <div class="nav-label">YOUR WORKSPACE</div>
-      <nav aria-label="Workspace">
-        <button class="nav active" data-panel="home">Your pets</button>
-        <button class="nav" data-panel="groups">
-          <span>Review groups</span
-          ><span id="nav-count" class="nav-count">—</span>
-        </button>
-        <button class="nav" data-panel="review">All photos</button>
-        <button class="nav" data-panel="pets">Sorting settings</button>
-        <button class="nav" data-panel="processing">Processing</button>
-        <button class="nav" data-panel="setup">Setup &amp; connection</button>
-      </nav>
-      <div class="sidebar-note">
-        <span class="dot"></span
-        ><strong id="mode-label">Checking connection</strong>
-        <p id="mode-description">
-          Your photos, processed on your own hardware.
-        </p>
+      <div class="header-actions">
+        <button
+          id="activity-indicator"
+          class="activity-button"
+          aria-label="Background activity"
+        >
+          <span class="activity-dot"></span
+          ><span id="activity-label">Connecting</span></button
+        ><a
+          class="icon-button settings-link"
+          href="#settings"
+          aria-label="Settings"
+          >⚙</a
+        >
       </div>
-      <div class="sidebar-footer">
-        A companion for Immich<small>v0.1.0 · Pet recognition</small>
+    </header>
+    <aside class="sidebar" aria-label="Library navigation">
+      <nav>
+        <a class="side-link" href="#library"
+          ><span aria-hidden="true">▦</span>Library</a
+        ><a class="side-link" href="#unidentified"
+          ><span aria-hidden="true">◉</span>Unidentified<span
+            id="unidentified-count"
+            class="nav-number"
+          ></span
+        ></a>
+      </nav>
+      <div class="side-label">YOUR PETS</div>
+      <nav id="pet-navigation"></nav>
+      <div class="side-bottom">
+        <a class="side-link" href="#settings"
+          ><span aria-hidden="true">⚙</span>Settings</a
+        >
+        <p>Private. On your own hardware.</p>
       </div>
     </aside>
-    <main>
-      <header class="topbar">
-        <span
-          >YOUR PHOTO LIBRARY / <strong id="breadcrumb">YOUR PETS</strong></span
-        ><button id="refresh" class="quiet">↻ Refresh</button>
-      </header>
-      <div id="demo-banner" class="banner hidden">
-        OFFLINE DEMO
-        <span
-          >Illustrations and simulated scores. No Immich connection or real
-          inference.</span
-        >
+    <main id="main">
+      <div id="demo-banner" class="notice hidden">
+        Demo library · Illustrations and simulated recognition. No real tags are
+        written.
       </div>
-      <div id="error-banner" class="banner error hidden" role="alert"></div>
-      <section class="page-intro">
-        <div>
-          <span class="eyebrow">PET RECOGNITION</span>
-          <h1 id="page-title">Your pets, together.</h1>
-          <p id="page-description">
-            Photos sort into pet collections automatically. Help with a group
-            when the identity is uncertain.
-          </p>
-        </div>
-        <button id="sync" class="primary">
-          Sync library <span aria-hidden="true">↗</span>
-        </button>
-      </section>
-      <section class="stats" aria-label="Library status">
-        <div>
-          <span>Not sorted yet</span><strong id="stat-pending">—</strong
-          ><small>Photos without a pet tag</small>
-        </div>
-        <div>
-          <span>Sorted photos</span><strong id="stat-confirmed">—</strong
-          ><small>Manual + automatic tags in Immich</small>
-        </div>
-        <div>
-          <span>Photos processing</span><strong id="stat-queued">—</strong
-          ><small>New photos waiting for detection</small>
-        </div>
-        <div>
-          <span>Registered pets</span><strong id="stat-pets">—</strong
-          ><small>A gallery of familiar faces</small>
-        </div>
-      </section>
-      <section class="recheck-card" aria-label="Recheck progress">
-        <div class="recheck-heading">
-          <div role="status">
-            <strong id="recheck-title">Checking sorting status…</strong>
-            <p id="recheck-detail"></p>
-          </div>
-          <button id="recheck-now" class="secondary">Sort again</button>
-        </div>
-        <progress
-          id="recheck-progress"
-          max="100"
-          aria-label="Recheck progress"
-          class="hidden"
-        ></progress>
-        <p id="recheck-next"></p>
-        <p id="tag-sync-status" class="hidden"></p>
-        <details id="review-breakdown" class="review-breakdown">
-          <summary>About the remaining photos</summary>
-          <p id="review-count-explanation"></p>
-          <div id="review-reasons"></div>
-          <p id="review-next-step"></p>
-        </details>
-      </section>
-      <section id="home-panel" class="panel">
-        <div class="section-heading">
-          <div>
-            <h2>Pet collections</h2>
-            <p>Automatic matches and the identities you confirm, together.</p>
-          </div>
-          <button class="quiet" data-panel="pets">Sorting settings →</button>
-        </div>
-        <div id="collection-grid" class="collection-grid"></div>
-        <div class="home-review-heading section-heading">
-          <div>
-            <h2>A quick check for the uncertain ones</h2>
-            <p id="home-group-summary">Finding groups of similar photos…</p>
-          </div>
-          <button class="secondary" data-panel="groups">Review groups →</button>
-        </div>
-        <div id="home-groups" class="group-grid"></div>
-      </section>
-      <section id="groups-panel" class="panel hidden">
-        <div class="section-heading">
-          <div>
-            <h2>One answer for a whole group.</h2>
-            <p>
-              Confirm the group together, or open it and uncheck exceptions.
-              Naming a pet improves future sorting automatically.
-            </p>
-          </div>
-          <span id="group-count" class="pill"></span>
-        </div>
-        <div
-          id="group-pet-filters"
-          class="pet-filters"
-          aria-label="Filter groups by pet"
-        ></div>
-        <div id="group-grid" class="group-grid"></div>
-        <div class="pagination">
-          <button id="group-previous" class="secondary">← Previous</button
-          ><span id="group-page"></span
-          ><button id="group-next" class="secondary">Next →</button>
-        </div>
-      </section>
-      <section id="review-panel" class="panel hidden">
-        <div class="section-heading">
-          <div>
-            <h2>Teach, automate, and review.</h2>
-            <p id="suggestion-state" role="status">
-              Choose a pet to review its suggestions, or select a batch to
-              assign together.
-            </p>
-          </div>
-          <span id="review-total" class="pill">0 detections</span>
-        </div>
-        <div class="filters tagging-tabs" aria-label="Review filter">
-          <button data-filter="untagged" class="selected" aria-pressed="true">
-            Untagged photos</button
-          ><button data-filter="tagged" aria-pressed="false">
-            Tagged photos
-          </button>
-        </div>
-        <div class="toolbar">
-          <div
-            id="pet-filters"
-            class="pet-filters"
-            aria-label="Filter by pet"
-          ></div>
-          <label class="pet-picker"
-            >Sort
-            <select id="review-sort" aria-label="Review order">
-              <option value="suggested">Best suggestions first</option>
-              <option value="newest">Newest first</option>
-            </select></label
-          >
-          <details class="more-filters">
-            <summary>More filters</summary>
-            <label
-              >Tag source<select
-                id="tag-source"
-                aria-label="Tag source"
-                disabled
-              >
-                <option value="all">Manual + automatic</option>
-                <option value="manual">Manual only</option>
-                <option value="automatic">Automatic only</option>
-              </select></label
-            >
-            <label
-              ><input id="include-dismissed" type="checkbox" /> Show skipped
-              photos</label
-            >
-            <label
-              ><input id="include-partial" type="checkbox" /> Include untagged
-              animals in already tagged photos</label
-            >
-          </details>
-        </div>
-        <p
-          id="review-view-description"
-          class="review-view-description"
-          role="status"
-        >
-          Photos without a pet tag. Suggestions are waiting for your choice.
-        </p>
-        <div class="batch-bar" aria-label="Bulk review">
-          <div class="batch-top">
-            <button id="select-page" class="secondary">Select shown</button>
-            <button id="select-strong" class="secondary">
-              Select strong suggestions
-            </button>
-            <button id="clear-selection" class="quiet">Unselect all</button>
-            <strong id="selection-count" aria-live="polite">0 selected</strong>
-          </div>
-          <div class="batch-actions">
-            <span id="assignment-label">Assign selected:</span>
-            <div id="batch-pets" class="assignment-buttons"></div>
-            <button id="accept-suggestions" class="primary" disabled>
-              Accept suggested identities
-            </button>
-            <button id="remove-tags" class="secondary" disabled>
-              Remove tags
-            </button>
-            <button id="dismiss-selected" class="quiet" disabled>
-              Skip selected
-            </button>
-          </div>
-          <p id="batch-feedback" class="batch-feedback" role="status"></p>
-        </div>
-        <div id="review-grid" class="review-grid"></div>
-        <div class="pagination">
-          <button id="previous" class="secondary">← Previous</button
-          ><span id="page-range"></span
-          ><button id="next" class="secondary">Next →</button>
-        </div>
-        <div class="tip">
-          <span aria-hidden="true">✦</span>
-          <p>
-            <strong>Fix a tag:</strong> Open Tagged, select photos, then choose
-            the correct pet or Remove tags. Manual and automatic tags are
-            together.
-          </p>
-          <button class="quiet" data-panel="pets">Sorting settings →</button>
-        </div>
-      </section>
-      <section id="pets-panel" class="panel hidden">
-        <div class="section-heading">
-          <div>
-            <h2>Automatic sorting</h2>
-            <p>
-              Name pets and correct mistakes. The app handles recognition in the
-              background.
-            </p>
-          </div>
-        </div>
-        <div class="sorting-settings">
-          <div>
-            <strong id="sorting-mode-label"></strong>
-            <p id="sorting-mode-message"></p>
-          </div>
-          <label
-            >Sorting preference<select id="sorting-profile">
-              <option value="careful">Fewer mistakes</option>
-              <option value="balanced">Balanced</option>
-              <option value="broader">Sort more</option>
-            </select></label
-          >
-          <button id="save-sorting" class="primary">Save preference</button>
-          <p>
-            “Sort more” includes less certain matches. Use a pet collection to
-            correct exceptions.
-          </p>
-        </div>
-        <div id="pet-grid" class="pet-grid"></div>
-        <form id="pet-form" class="form-row">
-          <label
-            >Pet's name<input
-              id="pet-name"
-              maxlength="64"
-              required
-              placeholder="e.g. Mochi"
-              autocomplete="off" /></label
-          ><label
-            >Species<select id="pet-species">
-              <option value="dog">Dog</option>
-              <option value="cat">Cat</option>
-            </select></label
-          ><button class="primary" type="submit">Register pet</button>
-        </form>
-        <div class="tip">
-          <p>
-            Every identity you confirm helps future sorting. Automatic results
-            do not count as your feedback; correcting one does.
-          </p>
-        </div>
-      </section>
-      <section id="processing-panel" class="panel hidden">
-        <div class="section-heading">
-          <div>
-            <h2>Quiet work in the background.</h2>
-            <p>
-              Queued photos survive restarts. Failed jobs retry before asking
-              for your attention.
-            </p>
-          </div>
-          <button id="retry" class="secondary">Retry failures</button>
-        </div>
-        <div class="actions">
-          <button id="backfill" class="primary">Scan existing library</button
-          ><button id="rematch" class="secondary">Recheck cached crops</button>
-        </div>
-        <div id="job-list" class="job-list"></div>
-      </section>
-      <section id="setup-panel" class="panel hidden">
-        <div class="section-heading">
-          <div>
-            <h2>A service of its own.</h2>
-            <p>
-              Immich manages your library. This companion finds and identifies
-              your pets.
-            </p>
-          </div>
-        </div>
-        <div id="setup-info" class="setup-grid"></div>
-        <div class="tip">
-          <p>
-            Configure the Immich URL, API key, and service token in your Compose
-            environment. Trusted networks can use direct access. The Immich API
-            key stays on the server. Run one instance against one Immich
-            account.
-          </p>
-        </div>
-        <button id="logout" class="secondary">
-          Forget service token in this tab
-        </button>
-      </section>
-      <div id="group-undo" class="group-undo hidden" role="status">
-        <span id="group-undo-label"></span
-        ><button id="undo-group" class="secondary">Undo group</button>
-      </div>
-      <footer class="main-footer">
-        <span id="last-sync">Waiting for first sync</span
-        ><span id="tagging-state">Automatic pet sorting</span>
-      </footer>
+      <div id="error-banner" class="notice error hidden" role="alert"></div>
+      <div id="view"></div>
     </main>
-    <dialog id="login-dialog">
+    <nav class="mobile-navigation" aria-label="Main navigation">
+      <a href="#library"><span aria-hidden="true">▦</span>Library</a
+      ><a href="#unidentified"><span aria-hidden="true">◉</span>Unidentified</a
+      ><a href="#settings"><span aria-hidden="true">⚙</span>Settings</a>
+    </nav>
+    <div
+      id="selection-bar"
+      class="selection-bar hidden"
+      aria-label="Selected photos actions"
+    ></div>
+    <div id="undo-bar" class="undo-bar hidden" role="status">
+      <span id="undo-label"></span><button id="undo-action">Undo</button
+      ><button id="dismiss-undo" class="icon-button" aria-label="Dismiss undo">
+        ×
+      </button>
+    </div>
+    <div id="toast" class="toast hidden" role="status"></div>
+    <dialog id="viewer" class="viewer" aria-label="Photo viewer">
+      <div class="viewer-top">
+        <span id="viewer-name"></span
+        ><button id="viewer-close" class="icon-button" aria-label="Close photo">
+          ×
+        </button>
+      </div>
+      <div class="viewer-image-wrap">
+        <button
+          id="viewer-previous"
+          class="viewer-arrow"
+          aria-label="Previous photo"
+        >
+          ‹</button
+        ><img id="viewer-image" alt="" /><button
+          id="viewer-next"
+          class="viewer-arrow"
+          aria-label="Next photo"
+        >
+          ›
+        </button>
+      </div>
+      <div id="viewer-actions" class="viewer-actions"></div>
+    </dialog>
+    <dialog
+      id="group-detail"
+      class="detail-dialog"
+      aria-labelledby="detail-title"
+    >
+      <div class="detail-header">
+        <div>
+          <h2 id="detail-title">Similar photos</h2>
+          <p>Choose the photos that belong together.</p>
+        </div>
+        <button id="detail-close" class="icon-button" aria-label="Close group">
+          ×
+        </button>
+      </div>
+      <div class="detail-toolbar">
+        <button id="detail-toggle" class="text-button">Clear selection</button
+        ><span id="detail-count"></span>
+      </div>
+      <div id="detail-grid" class="photo-grid detail-grid"></div>
+      <div id="detail-actions" class="detail-actions"></div>
+    </dialog>
+    <dialog id="login-dialog" class="login-dialog">
       <form id="login-form">
-        <span class="eyebrow">YOUR PRIVATE WORKSPACE</span>
-        <h2>Connect to the companion</h2>
-        <p>
-          Enter PET_SERVICE_TOKEN from your service environment. This is
-          separate from your Immich API key.
-        </p>
+        <span class="brand-mark"
+          ><svg viewBox="0 0 32 32" width="29" height="29" aria-hidden="true">
+            <ellipse
+              cx="6.5"
+              cy="12"
+              rx="3.5"
+              ry="4.7"
+              fill="currentColor"
+              transform="rotate(-22 6.5 12)"
+            />
+            <ellipse
+              cx="13"
+              cy="6.8"
+              rx="3.4"
+              ry="4.6"
+              fill="currentColor"
+              transform="rotate(-8 13 6.8)"
+            />
+            <ellipse
+              cx="21"
+              cy="7.5"
+              rx="3.5"
+              ry="4.6"
+              fill="currentColor"
+              transform="rotate(14 21 7.5)"
+            />
+            <ellipse
+              cx="27"
+              cy="13.5"
+              rx="3.2"
+              ry="4.4"
+              fill="currentColor"
+              transform="rotate(27 27 13.5)"
+            />
+            <path
+              d="M8 23c0-4 5-9 8-9s8 5 8 9c0 5-4 5-8 3-4 2-8 2-8-3Z"
+              fill="currentColor"
+            /></svg
+        ></span>
+        <h1>Connect to your library</h1>
+        <p>Enter the companion service token.</p>
         <label
           >Service token<input
             id="service-token"
             type="password"
-            required
             autocomplete="off"
+            required
         /></label>
         <p id="login-error" class="error-text" role="alert"></p>
         <button class="primary" type="submit">Connect</button>
       </form>
     </dialog>
-    <dialog id="group-dialog" class="group-dialog">
-      <div class="group-dialog-heading">
-        <div>
-          <h2 id="group-dialog-title"></h2>
-          <p>
-            Uncheck exceptions, then name the selected photos. Unchecked photos
-            stay for later.
-          </p>
-        </div>
-        <button id="close-group" class="secondary">Close</button>
-      </div>
-      <div class="group-dialog-actions">
-        <button id="group-toggle-all" class="secondary">Clear selection</button
-        ><strong id="group-selected-count"></strong>
-        <div id="group-dialog-pets" class="assignment-buttons"></div>
-      </div>
-      <div id="group-photo-grid" class="group-photo-grid"></div>
-    </dialog>
-    <div id="toast" role="status" class="toast hidden"></div>
   </body>
 </html>

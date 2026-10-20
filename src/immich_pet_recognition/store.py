@@ -62,8 +62,12 @@ CREATE TABLE IF NOT EXISTS tag_removals (
  PRIMARY KEY(detection_id, model, tag),
  FOREIGN KEY(detection_id, model) REFERENCES reviews(detection_id, model)
 );
+CREATE TABLE IF NOT EXISTS decision_receipts (
+ id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, created REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS jobs_ready ON jobs(status, available_at);
 CREATE INDEX IF NOT EXISTS detections_asset ON detections(asset_id, revision, detector);
+CREATE INDEX IF NOT EXISTS references_detection ON reference_images(detection_id);
 """
 
 

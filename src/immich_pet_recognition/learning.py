@@ -12,7 +12,9 @@ PROFILES = {"careful": 1.0, "balanced": 0.98, "broader": 0.95}
 def _score(vector, examples):
     if not examples:
         return -1.0
-    values = np.asarray(examples, dtype=np.float32) @ vector
+    # Tiny matrix/vector BLAS calls can each start a large thread pool on the
+    # NAS. A direct reduction is faster and leaves the request threads free.
+    values = np.einsum("ij,j->i", np.asarray(examples, dtype=np.float32), vector)
     count = min(3, len(values))
     return float(np.mean(np.partition(values, len(values) - count)[-count:]))
 

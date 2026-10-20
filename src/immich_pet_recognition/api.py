@@ -2,6 +2,8 @@ import hashlib
 import json
 import secrets
 import sqlite3
+import tempfile
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
@@ -11,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from PIL import Image
 from pydantic import BaseModel, Field, field_validator
 
 from .config import Settings
@@ -37,6 +40,10 @@ class ReferenceCreate(BaseModel):
     kind: Literal["positive", "negative"] = "positive"
 
 
+class CoverUpdate(BaseModel):
+    detection_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+
+
 class AutomationUpdate(BaseModel):
     enabled: bool
 
@@ -46,23 +53,41 @@ class MatchingUpdate(BaseModel):
     profile: Literal["careful", "balanced", "broader"] = "balanced"
 
 
-class GroupDecision(BaseModel):
+class WriteOperation(BaseModel):
+    operation_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class GroupDecision(WriteOperation):
     pet_id: UUID | None = None
     excluded: list[str] = Field(default_factory=list, max_length=200)
     skip: bool = False
 
 
+class GroupBatchDecision(WriteOperation):
+    group_ids: list[str] = Field(min_length=1, max_length=5000)
+    pet_id: UUID | None = None
+    skip: bool = False
+
+    @field_validator("group_ids")
+    @classmethod
+    def unique_groups(cls, values):
+        if len(set(values)) != len(values):
+            raise ValueError("Each group can appear only once in a batch")
+        return values
+
+
 class Decision(BaseModel):
-    status: Literal["confirmed", "rejected"]
+    status: Literal["confirmed", "rejected", "pending"]
     pet_id: UUID | None = None
     expected_pet_id: UUID | None = None
+    expected_status: Literal["pending", "confirmed", "rejected"] | None = None
 
 
 class BulkDecision(Decision):
     detection_id: str = Field(pattern=r"^[a-f0-9]{32}$")
 
 
-class BulkReview(BaseModel):
+class BulkReview(WriteOperation):
     items: list[BulkDecision] = Field(min_length=1, max_length=100)
 
     @field_validator("items")
@@ -116,10 +141,12 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
 
     auth = [Depends(authenticate)]
     asset_version = hashlib.sha256(
-        (STATIC / "app.js").read_bytes() + (STATIC / "style.css").read_bytes()
+        b"".join(
+            (STATIC / asset).read_bytes() for asset in ("app.js", "action-queue.js", "style.css")
+        )
     ).hexdigest()[:12]
     index_html = (STATIC / "index.html").read_text()
-    for asset in ("app.js", "style.css"):
+    for asset in ("app.js", "action-queue.js", "style.css"):
         index_html = index_html.replace(f"/static/{asset}", f"/static/{asset}?v={asset_version}")
 
     @app.get("/health")
@@ -153,7 +180,28 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
 
     @app.get("/api/collections", dependencies=auth)
     def collections():
-        return service.collections()
+        pets = service.collections()
+        for pet in pets:
+            saved = service.store.state("pet_cover:" + pet["id"])
+            if saved and current_cover(pet["id"], saved):
+                pet["cover_id"] = saved
+        return pets
+
+    def current_cover(pet_id, detection_id):
+        return service.store.one(
+            "SELECT d.id FROM detections d JOIN assets a ON a.id=d.asset_id "
+            "JOIN reviews r ON r.detection_id=d.id WHERE d.id=? AND r.pet_id=? "
+            "AND r.status='confirmed' AND r.model=? AND d.detector=? AND d.revision=a.revision",
+            (detection_id, pet_id, settings.recognizer_key, settings.detector_key),
+        )
+
+    @app.put("/api/pets/{pet_id}/cover", dependencies=auth)
+    def set_cover(pet_id: UUID, body: CoverUpdate):
+        with service.model_lock:
+            if not current_cover(str(pet_id), body.detection_id):
+                raise HTTPException(409, "Choose a current photo from this pet's album")
+            service.store.set_state("pet_cover:" + str(pet_id), body.detection_id)
+        return {"cover_id": body.detection_id}
 
     @app.get("/api/groups", dependencies=auth)
     def groups(
@@ -162,18 +210,10 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         limit: int = Query(12, ge=1, le=48),
     ):
         rows = service.groups()
-        if rows is None:
-            return {
-                "updating": True,
-                "items": [],
-                "total_groups": 0,
-                "total_photos": 0,
-                "total_crops": 0,
-            }
         if pet_id:
             rows = [row for row in rows if row["pet_id"] == str(pet_id)]
         return {
-            "updating": False,
+            "updating": service.suggestions_pending(),
             "items": [
                 {k: v for k, v in row.items() if k != "members"}
                 for row in rows[offset : offset + limit]
@@ -182,6 +222,51 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
             "total_crops": sum(row["crop_count"] for row in rows),
             "total_photos": len({member["asset_id"] for row in rows for member in row["members"]}),
         }
+
+    def save_once(body, operation, scope=None):
+        if not body.operation_id:
+            return operation()
+        payload = body.model_dump(mode="json", exclude={"operation_id"})
+        fingerprint = hashlib.sha256(
+            json.dumps([scope or type(body).__name__, payload], sort_keys=True).encode()
+        ).hexdigest()
+        with service.model_lock:
+            receipt = service.store.one(
+                "SELECT * FROM decision_receipts WHERE id=?", (body.operation_id,)
+            )
+            if receipt:
+                if receipt["fingerprint"] != fingerprint:
+                    raise HTTPException(409, "This request identifier was already used")
+                result = json.loads(receipt["result"])
+                if result.get("undo_id"):
+                    current_undo = service.undo_info()
+                    if not current_undo or current_undo["id"] != result["undo_id"]:
+                        result["undo_id"] = None
+                return result
+            result = operation()
+            with service.store.connection() as conn:
+                conn.execute(
+                    "INSERT INTO decision_receipts VALUES (?,?,?,?)",
+                    (body.operation_id, fingerprint, json.dumps(result), time.time()),
+                )
+                conn.execute(
+                    "DELETE FROM decision_receipts WHERE created<? OR id NOT IN "
+                    "(SELECT id FROM decision_receipts ORDER BY created DESC LIMIT 256)",
+                    (time.time() - 3600,),
+                )
+            return result
+
+    @app.post("/api/groups/batch", dependencies=auth)
+    def group_batch_decision(body: GroupBatchDecision):
+        try:
+            return save_once(
+                body,
+                lambda: service.decide_groups(
+                    body.group_ids, str(body.pet_id) if body.pet_id else None, body.skip
+                ),
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
 
     @app.get("/api/groups/{group_id}", dependencies=auth)
     def group_detail(group_id: str):
@@ -193,16 +278,22 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
     @app.post("/api/groups/{group_id}/decision", dependencies=auth)
     def group_decision(group_id: str, body: GroupDecision):
         try:
-            return service.decide_group(
-                group_id, str(body.pet_id) if body.pet_id else None, body.excluded, body.skip
+            return save_once(
+                body,
+                lambda: service.decide_group(
+                    group_id, str(body.pet_id) if body.pet_id else None, body.excluded, body.skip
+                ),
+                scope="group:" + group_id,
             )
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
 
     @app.post("/api/groups/undo/{action_id}", dependencies=auth)
-    def undo_group(action_id: str):
+    def undo_group(action_id: str, body: WriteOperation | None = None):
         try:
-            return service.undo_group(action_id)
+            if body is None:
+                return service.undo_group(action_id)
+            return save_once(body, lambda: service.undo_group(action_id), scope="undo:" + action_id)
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
 
@@ -334,13 +425,35 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         }
 
     @app.get("/api/detections/{detection_id}/crop", dependencies=auth)
-    def crop(detection_id: str):
+    def crop(detection_id: str, size: int | None = Query(None, ge=64, le=1024)):
         row = service.store.one("SELECT crop FROM detections WHERE id=?", (detection_id,))
         if row is None:
             raise HTTPException(404, "Crop not found")
         path = service.crops / row["crop"]
         if not path.is_file():
             raise HTTPException(404, "Crop unavailable; reprocess this asset")
+        if size:
+            thumbnails = settings.data_dir / "thumbnails"
+            thumbnails.mkdir(exist_ok=True)
+            key = hashlib.sha256((detection_id + row["crop"]).encode()).hexdigest()
+            thumbnail = thumbnails / f"{key}-{size}.jpg"
+            if not thumbnail.is_file():
+                with Image.open(path) as original:
+                    image = original.convert("RGB")
+                    image.thumbnail((size, size), Image.Resampling.LANCZOS)
+                with tempfile.NamedTemporaryFile(
+                    dir=thumbnails, suffix=".jpg", delete=False
+                ) as tmp:
+                    temporary = Path(tmp.name)
+                try:
+                    image.save(temporary, "JPEG", quality=82, optimize=True)
+                    temporary.replace(thumbnail)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            return FileResponse(
+                thumbnail,
+                headers={"Cache-Control": "private, max-age=86400", "Vary": "Authorization"},
+            )
         return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
     @app.post("/api/detections/{detection_id}/decision", dependencies=auth)
@@ -354,6 +467,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
                 body.status,
                 body.status == "confirmed",
                 str(body.expected_pet_id) if body.expected_pet_id else None,
+                body.expected_status,
             )
             return {"status": body.status, "writeback": "demo only" if settings.demo else "queued"}
         except ValueError as error:
@@ -361,6 +475,9 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
 
     @app.post("/api/review/batch", dependencies=auth)
     def bulk_review(body: BulkReview):
+        return save_once(body, lambda: perform_bulk_review(body))
+
+    def perform_bulk_review(body):
         results = service.bulk_decide(
             [
                 {
@@ -369,6 +486,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
                     "status": item.status,
                     "learn": item.status == "confirmed",
                     "expected_pet_id": str(item.expected_pet_id) if item.expected_pet_id else None,
+                    "expected_status": item.expected_status,
                 }
                 for item in body.items
             ]
