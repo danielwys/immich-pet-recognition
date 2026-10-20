@@ -5,12 +5,14 @@ import logging
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
 from PIL import Image, ImageOps
 
 from .config import Settings
+from .grouping import similar_groups
 from .immich import ImmichClient, ImmichError, asset_revision
 from .learning import PROFILES, fit_policies
 from .matching import match_pet
@@ -58,9 +60,13 @@ class Service:
         self.policy_lock = threading.RLock()
         self.policy_cache = None
         self.group_cache = None
+        self.group_lock = threading.Lock()
+        self.batch_depth = 0
+        self.batch_gallery_dirty = False
 
     def start(self):
         self.store.execute("UPDATE jobs SET status='queued' WHERE status='processing'")
+        self.adopt_manual_identifications()
         if self.settings.demo:
             from .demo import seed_demo
 
@@ -81,6 +87,34 @@ class Service:
         # Allow in-flight inference to finish. Interrupted jobs recover on the next start.
         if self.worker is None or not self.worker.is_alive():
             self.immich.close()
+
+    def adopt_manual_identifications(self):
+        """Older manual names are identity feedback too, without an enrollment step."""
+        with self.model_lock:
+            changed = self.store.execute(
+                "DELETE FROM reference_images WHERE kind='positive' AND EXISTS("
+                "SELECT 1 FROM reviews r JOIN detections d ON d.id=r.detection_id "
+                "JOIN assets a ON a.id=d.asset_id "
+                "WHERE r.detection_id=reference_images.detection_id "
+                "AND r.status='confirmed' AND r.pet_id<>reference_images.pet_id AND r.model=? "
+                "AND d.detector=? AND d.revision=a.revision AND NOT EXISTS("
+                "SELECT 1 FROM automatic_reviews ar WHERE ar.detection_id=r.detection_id "
+                "AND ar.model=r.model))",
+                (self.settings.recognizer_key, self.settings.detector_key),
+            )
+            changed += self.store.execute(
+                "INSERT INTO reference_images(pet_id,detection_id,kind) "
+                "SELECT r.pet_id,r.detection_id,'positive' FROM reviews r "
+                "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+                "WHERE r.status='confirmed' AND r.pet_id IS NOT NULL AND r.model=? "
+                "AND d.detector=? AND d.revision=a.revision AND NOT EXISTS("
+                "SELECT 1 FROM automatic_reviews ar WHERE ar.detection_id=r.detection_id "
+                "AND ar.model=r.model) ON CONFLICT(pet_id,detection_id) "
+                "DO UPDATE SET kind='positive' WHERE kind<>'positive'",
+                (self.settings.recognizer_key, self.settings.detector_key),
+            )
+            if changed:
+                self.gallery_changed()
 
     def run(self):
         next_poll = 0.0
@@ -358,11 +392,16 @@ class Service:
                 "margin=excluded.margin,status=excluded.status",
                 (detection["id"], model, result.pet_id, result.score, result.margin, status),
             )
+            self._review_changed(conn)
             if automatic:
                 self.group_cache = None
                 conn.execute(
                     "INSERT OR IGNORE INTO automatic_reviews VALUES (?,?)",
                     (detection["id"], model),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO automatic_sources VALUES (?,?,?)",
+                    (detection["id"], model, self.store.state("gallery_revision", "0")),
                 )
         return automatic
 
@@ -371,6 +410,13 @@ class Service:
             return False
         row = self.store.one("SELECT enabled FROM pet_automation WHERE pet_id=?", (pet_id,))
         return bool(row["enabled"]) if row else self.settings.auto_tag
+
+    def _review_changed(self, conn):
+        conn.execute(
+            "INSERT INTO state VALUES ('review_revision','1') ON CONFLICT(key) "
+            "DO UPDATE SET value=CAST(value AS INTEGER)+1"
+        )
+        self.group_cache = None
 
     def pets(self):
         policies = self.policies()
@@ -556,6 +602,9 @@ class Service:
 
     def gallery_changed(self):
         with self.model_lock:
+            if self.batch_depth:
+                self.batch_gallery_dirty = True
+                return
             with self.store.connection() as conn:
                 conn.execute(
                     "INSERT INTO state VALUES ('gallery_revision','1') ON CONFLICT(key) "
@@ -666,7 +715,7 @@ class Service:
             )
             self.gallery_changed()
 
-    def decide(self, detection_id, pet_id, status, learn=False, expected_pet_id=None):
+    def decide(self, detection_id, pet_id, status, learn=True, expected_pet_id=None):
         with self.model_lock:
             self.group_cache = None
             detection = self.store.one(
@@ -711,6 +760,10 @@ class Service:
                     (detection_id, self.settings.recognizer_key),
                 )
                 conn.execute(
+                    "DELETE FROM automatic_sources WHERE detection_id=? AND model=?",
+                    (detection_id, self.settings.recognizer_key),
+                )
+                conn.execute(
                     "UPDATE reviews SET pet_id=?,status=?,published=?,error=NULL "
                     "WHERE detection_id=? AND model=?",
                     (
@@ -721,6 +774,7 @@ class Service:
                         self.settings.recognizer_key,
                     ),
                 )
+                self._review_changed(conn)
                 if changed and row["status"] == "confirmed" and row["pet_id"]:
                     old_pet = conn.execute(
                         "SELECT tag FROM pets WHERE id=?", (row["pet_id"],)
@@ -765,10 +819,22 @@ class Service:
                 self.gallery_changed()
         self.wake_event.set()
 
+    @contextmanager
+    def batch_updates(self):
+        with self.model_lock:
+            self.batch_depth += 1
+            try:
+                yield
+            finally:
+                self.batch_depth -= 1
+                if not self.batch_depth and self.batch_gallery_dirty:
+                    self.batch_gallery_dirty = False
+                    self.gallery_changed()
+
     def bulk_decide(self, items):
         results = []
         # Publication cannot race the batch; individual invalid rows remain untouched.
-        with self.model_lock:
+        with self.batch_updates():
             for item in items:
                 try:
                     self.decide(
@@ -784,6 +850,234 @@ class Service:
                         {"id": item["detection_id"], "saved": False, "error": str(error)}
                     )
         return results
+
+    def collections(self):
+        published = (
+            "r.status='confirmed'"
+            if self.settings.demo
+            else "r.status='confirmed' AND r.published=1"
+        )
+        counts = {
+            row["pet_id"]: row
+            for row in self.store.rows(
+                "SELECT r.pet_id,count(DISTINCT d.asset_id) photo_count,"
+                "count(DISTINCT CASE WHEN ar.detection_id IS NOT NULL THEN d.asset_id END) "
+                "auto_photo_count,(SELECT refs.detection_id FROM reference_images refs "
+                "WHERE refs.pet_id=r.pet_id AND refs.kind='positive' ORDER BY refs.rowid LIMIT 1) "
+                "cover_id FROM reviews r "
+                "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+                "LEFT JOIN automatic_reviews ar ON ar.detection_id=r.detection_id "
+                "AND ar.model=r.model "
+                f"WHERE {published} AND r.model=? AND d.detector=? AND d.revision=a.revision "
+                "GROUP BY r.pet_id",
+                (self.settings.recognizer_key, self.settings.detector_key),
+            )
+        }
+        return [
+            {
+                **pet,
+                **counts.get(
+                    pet["id"], {"photo_count": 0, "auto_photo_count": 0, "cover_id": None}
+                ),
+            }
+            for pet in self.pets()
+        ]
+
+    def groups(self):
+        if self.suggestions_pending():
+            return None
+        model = self.settings.recognizer_key
+
+        def signature():
+            return (
+                self.store.state("gallery_revision", "0"),
+                self.store.state("review_revision", "0"),
+                model,
+                self.settings.detector_key,
+            )
+
+        revision = signature()
+        with self.group_lock:
+            if self.group_cache and self.group_cache[0] == revision:
+                return self.group_cache[1]
+            rows = self.store.rows(
+                "WITH tagged AS MATERIALIZED (SELECT DISTINCT d.asset_id FROM reviews r "
+                "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+                "WHERE r.model=? AND d.detector=? AND d.revision=a.revision "
+                + ("AND r.status='confirmed' " if self.settings.demo else "AND r.published=1 ")
+                + "UNION SELECT asset_id FROM tag_removals) "
+                "SELECT d.id,d.asset_id,d.species,a.name,r.pet_id,r.score,r.margin,e.vector "
+                "FROM reviews r JOIN detections d ON d.id=r.detection_id "
+                "JOIN assets a ON a.id=d.asset_id JOIN embeddings e ON e.detection_id=d.id "
+                "AND e.model=r.model WHERE r.model=? AND d.detector=? AND d.revision=a.revision "
+                "AND r.status='pending' AND NOT EXISTS(SELECT 1 FROM tagged t "
+                "WHERE t.asset_id=d.asset_id) ORDER BY r.score DESC,d.id",
+                (model, self.settings.detector_key, model, self.settings.detector_key),
+            )
+            for row in rows:
+                row["vector"] = np.frombuffer(row["vector"], dtype=np.float32)
+            groups = similar_groups(rows)
+            names = {pet["id"]: pet["name"] for pet in self.store.rows("SELECT id,name FROM pets")}
+            for group in groups:
+                group["pet_name"] = names.get(group["pet_id"])
+            if revision == signature() and not self.suggestions_pending():
+                self.group_cache = (revision, groups)
+            return groups
+
+    def _references_for(self, detection_id):
+        return self.store.rows(
+            "SELECT pet_id,kind FROM reference_images WHERE detection_id=? ORDER BY pet_id,kind",
+            (detection_id,),
+        )
+
+    def decide_group(self, group_id, pet_id, excluded, skip=False):
+        groups = self.groups()
+        group = next((item for item in groups or [] if item["id"] == group_id), None)
+        if not group:
+            raise ValueError("This group changed. Refresh to see the current photos.")
+        ids = {member["id"] for member in group["members"]}
+        if not set(excluded) <= ids:
+            raise ValueError("An excluded photo is not in this group")
+        members = [member for member in group["members"] if member["id"] not in excluded]
+        if not members:
+            raise ValueError("Select at least one photo")
+        if not skip and not self.store.one("SELECT id FROM pets WHERE id=?", (pet_id,)):
+            raise ValueError("Choose a pet")
+        with self.model_lock:
+            before = []
+            for member in members:
+                row = self.store.one(
+                    "SELECT r.*,d.species,d.asset_id FROM reviews r JOIN detections d "
+                    "ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+                    "WHERE d.id=? AND r.model=? AND d.detector=? AND d.revision=a.revision",
+                    (member["id"], self.settings.recognizer_key, self.settings.detector_key),
+                )
+                if row is None or row["status"] != "pending":
+                    raise ValueError(
+                        "A photo was already assigned. Refresh this group before changing it."
+                    )
+                before.append({**row, "references": self._references_for(member["id"])})
+            results = self.bulk_decide(
+                [
+                    {
+                        "detection_id": row["detection_id"],
+                        "pet_id": None if skip else pet_id,
+                        "status": "rejected" if skip else "confirmed",
+                        "learn": not skip,
+                    }
+                    for row in before
+                ]
+            )
+            if skip:
+                with self.store.connection() as conn:
+                    for row in before:
+                        conn.execute(
+                            "INSERT INTO reference_images SELECT id,?,'negative' FROM pets "
+                            "WHERE species=? ON CONFLICT(pet_id,detection_id) "
+                            "DO UPDATE SET kind='negative'",
+                            (row["detection_id"], row["species"]),
+                        )
+                self.gallery_changed()
+            for row in before:
+                row["after_references"] = self._references_for(row["detection_id"])
+            action = {
+                "id": uuid.uuid4().hex,
+                "pet_id": pet_id,
+                "skip": skip,
+                "rows": before,
+                "revision": self.store.state("gallery_revision", "0"),
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+            self.store.set_state("last_group_action", json.dumps(action))
+            self.group_cache = None
+            return {"saved": sum(row["saved"] for row in results), "undo_id": action["id"]}
+
+    def undo_info(self):
+        action = json.loads(self.store.state("last_group_action", "null"))
+        if (
+            not action
+            or (datetime.now(UTC) - datetime.fromisoformat(action["created_at"])).total_seconds()
+            > 3600
+        ):
+            return None
+        return {
+            "id": action["id"],
+            "count": len(action["rows"]),
+            "pet_id": action["pet_id"],
+            "skip": action["skip"],
+        }
+
+    def undo_group(self, action_id):
+        info = self.undo_info()
+        if info is None or info["id"] != action_id:
+            raise ValueError(
+                "This undo is no longer available. Correct tags in the pet collection."
+            )
+        action = json.loads(self.store.state("last_group_action"))
+        with self.model_lock:
+            for old in action["rows"]:
+                current = self.store.one(
+                    "SELECT r.* FROM reviews r JOIN detections d ON d.id=r.detection_id "
+                    "JOIN assets a ON a.id=d.asset_id WHERE d.id=? AND r.model=? "
+                    "AND d.detector=? AND d.revision=a.revision",
+                    (old["detection_id"], self.settings.recognizer_key, self.settings.detector_key),
+                )
+                expected_status = "rejected" if action["skip"] else "confirmed"
+                if (
+                    not current
+                    or current["status"] != expected_status
+                    or current["pet_id"] != (None if action["skip"] else action["pet_id"])
+                    or self._references_for(old["detection_id"]) != old["after_references"]
+                ):
+                    raise ValueError(
+                        "A photo in this group changed. Correct it in the pet collection."
+                    )
+            # Undo automatic results caused by this group's teaching as well.
+            propagated = self.store.rows(
+                "SELECT r.* FROM reviews r JOIN detections d ON d.id=r.detection_id "
+                "JOIN assets a ON a.id=d.asset_id JOIN automatic_sources src "
+                "ON src.detection_id=r.detection_id AND src.model=r.model "
+                "JOIN automatic_reviews ar ON ar.detection_id=r.detection_id "
+                "AND ar.model=r.model "
+                "WHERE src.revision=? AND r.model=? AND r.status='confirmed' "
+                "AND d.detector=? AND d.revision=a.revision",
+                (action["revision"], self.settings.recognizer_key, self.settings.detector_key),
+            )
+            with self.batch_updates():
+                for row in [*action["rows"], *propagated]:
+                    self.decide(row["detection_id"], None, "rejected", False)
+                    with self.store.connection() as conn:
+                        conn.execute(
+                            "UPDATE reviews SET pet_id=?,status='pending',score=?,margin=? "
+                            "WHERE detection_id=? AND model=?",
+                            (
+                                row.get("pet_id") if "references" in row else None,
+                                row["score"],
+                                row["margin"],
+                                row["detection_id"],
+                                self.settings.recognizer_key,
+                            ),
+                        )
+                        if "references" in row:
+                            conn.execute(
+                                "UPDATE detections SET species=? WHERE id=?",
+                                (row["species"], row["detection_id"]),
+                            )
+                            conn.execute(
+                                "DELETE FROM reference_images WHERE detection_id=?",
+                                (row["detection_id"],),
+                            )
+                            conn.executemany(
+                                "INSERT INTO reference_images VALUES (?,?,?)",
+                                [
+                                    (ref["pet_id"], row["detection_id"], ref["kind"])
+                                    for ref in row["references"]
+                                ],
+                            )
+                self.gallery_changed()
+            self.store.set_state("last_group_action", "null")
+            self.group_cache = None
+            return {"restored": len(action["rows"]), "automatic_restored": len(propagated)}
 
     def publish_one(self):
         with self.model_lock:
@@ -820,6 +1114,7 @@ class Service:
                 "UPDATE reviews SET published=?,error=NULL WHERE detection_id=? AND model=?",
                 (published, row["detection_id"], row["model"]),
             )
+            self._review_changed(conn)
 
     def _remove_one(self):
         if self.settings.demo:
@@ -976,6 +1271,7 @@ class Service:
             "match_threshold": self.settings.match_threshold,
             "match_margin": self.settings.match_margin,
             "matching": self.matching_options(),
+            "undo_group": self.undo_info(),
             "suggestions_updating": self.suggestions_pending(),
             "recheck": self.recheck_status(),
             "review_summary": self.review_summary(),

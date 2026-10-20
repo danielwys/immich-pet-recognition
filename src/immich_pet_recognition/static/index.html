@@ -15,11 +15,13 @@
       >
       <div class="nav-label">YOUR WORKSPACE</div>
       <nav aria-label="Workspace">
-        <button class="nav active" data-panel="review">
-          <span>Review photos</span
-          ><span id="nav-count" class="nav-count">0</span>
+        <button class="nav active" data-panel="home">Your pets</button>
+        <button class="nav" data-panel="groups">
+          <span>Review groups</span
+          ><span id="nav-count" class="nav-count">—</span>
         </button>
-        <button class="nav" data-panel="pets">Pets &amp; automation</button>
+        <button class="nav" data-panel="review">All photos</button>
+        <button class="nav" data-panel="pets">Sorting settings</button>
         <button class="nav" data-panel="processing">Processing</button>
         <button class="nav" data-panel="setup">Setup &amp; connection</button>
       </nav>
@@ -36,7 +38,8 @@
     </aside>
     <main>
       <header class="topbar">
-        <span>YOUR PHOTO LIBRARY / <strong id="breadcrumb">REVIEW</strong></span
+        <span
+          >YOUR PHOTO LIBRARY / <strong id="breadcrumb">YOUR PETS</strong></span
         ><button id="refresh" class="quiet">↻ Refresh</button>
       </header>
       <div id="demo-banner" class="banner hidden">
@@ -50,10 +53,10 @@
       <section class="page-intro">
         <div>
           <span class="eyebrow">PET RECOGNITION</span>
-          <h1 id="page-title">Tag your pets.</h1>
+          <h1 id="page-title">Your pets, together.</h1>
           <p id="page-description">
-            Start with untagged photos. Tagged keeps manual and automatic
-            results together.
+            Photos sort into pet collections automatically. Help with a group
+            when the identity is uncertain.
           </p>
         </div>
         <button id="sync" class="primary">
@@ -62,11 +65,11 @@
       </section>
       <section class="stats" aria-label="Library status">
         <div>
-          <span>Untagged photos</span><strong id="stat-pending">—</strong
+          <span>Not sorted yet</span><strong id="stat-pending">—</strong
           ><small>Photos without a pet tag</small>
         </div>
         <div>
-          <span>Tagged photos</span><strong id="stat-confirmed">—</strong
+          <span>Sorted photos</span><strong id="stat-confirmed">—</strong
           ><small>Manual + automatic tags in Immich</small>
         </div>
         <div>
@@ -81,10 +84,10 @@
       <section class="recheck-card" aria-label="Recheck progress">
         <div class="recheck-heading">
           <div role="status">
-            <strong id="recheck-title">Checking recheck status…</strong>
+            <strong id="recheck-title">Checking sorting status…</strong>
             <p id="recheck-detail"></p>
           </div>
-          <button id="recheck-now" class="secondary">Recheck now</button>
+          <button id="recheck-now" class="secondary">Sort again</button>
         </div>
         <progress
           id="recheck-progress"
@@ -95,13 +98,54 @@
         <p id="recheck-next"></p>
         <p id="tag-sync-status" class="hidden"></p>
         <details id="review-breakdown" class="review-breakdown">
-          <summary>Why are photos still untagged?</summary>
+          <summary>About the remaining photos</summary>
           <p id="review-count-explanation"></p>
           <div id="review-reasons"></div>
           <p id="review-next-step"></p>
         </details>
       </section>
-      <section id="review-panel" class="panel">
+      <section id="home-panel" class="panel">
+        <div class="section-heading">
+          <div>
+            <h2>Pet collections</h2>
+            <p>Automatic matches and the identities you confirm, together.</p>
+          </div>
+          <button class="quiet" data-panel="pets">Sorting settings →</button>
+        </div>
+        <div id="collection-grid" class="collection-grid"></div>
+        <div class="home-review-heading section-heading">
+          <div>
+            <h2>A quick check for the uncertain ones</h2>
+            <p id="home-group-summary">Finding groups of similar photos…</p>
+          </div>
+          <button class="secondary" data-panel="groups">Review groups →</button>
+        </div>
+        <div id="home-groups" class="group-grid"></div>
+      </section>
+      <section id="groups-panel" class="panel hidden">
+        <div class="section-heading">
+          <div>
+            <h2>One answer for a whole group.</h2>
+            <p>
+              Confirm the group together, or open it and uncheck exceptions.
+              Naming a pet improves future sorting automatically.
+            </p>
+          </div>
+          <span id="group-count" class="pill"></span>
+        </div>
+        <div
+          id="group-pet-filters"
+          class="pet-filters"
+          aria-label="Filter groups by pet"
+        ></div>
+        <div id="group-grid" class="group-grid"></div>
+        <div class="pagination">
+          <button id="group-previous" class="secondary">← Previous</button
+          ><span id="group-page"></span
+          ><button id="group-next" class="secondary">Next →</button>
+        </div>
+      </section>
+      <section id="review-panel" class="panel hidden">
         <div class="section-heading">
           <div>
             <h2>Teach, automate, and review.</h2>
@@ -177,9 +221,6 @@
             <button id="accept-suggestions" class="primary" disabled>
               Accept suggested identities
             </button>
-            <button id="teach-confirmed" class="secondary" disabled>
-              Use confirmed as examples
-            </button>
             <button id="remove-tags" class="secondary" disabled>
               Remove tags
             </button>
@@ -187,14 +228,6 @@
               Skip selected
             </button>
           </div>
-          <label class="learn-option"
-            ><input type="checkbox" id="learn-from-assignments" checked /> Use
-            my assignments as examples
-            <span
-              >Updates suggestions after each batch. Automatic matches never
-              teach themselves.</span
-            ></label
-          >
           <p id="batch-feedback" class="batch-feedback" role="status"></p>
         </div>
         <div id="review-grid" class="review-grid"></div>
@@ -203,23 +236,6 @@
           ><span id="page-range"></span
           ><button id="next" class="secondary">Next →</button>
         </div>
-        <details class="review-automation">
-          <summary id="review-automation-summary">
-            Automatic tagging settings
-          </summary>
-          <div id="learning-progress" class="learning-progress"></div>
-        </details>
-        <details class="match-guide">
-          <summary id="match-guide-summary">
-            What makes a strong suggestion?
-          </summary>
-          <p id="match-guide-text"></p>
-          <p>
-            Similarity is not a probability. These defaults need checking on
-            photos you have kept out of the example gallery. More examples do
-            not guarantee accuracy.
-          </p>
-        </details>
         <div class="tip">
           <span aria-hidden="true">✦</span>
           <p>
@@ -227,33 +243,38 @@
             the correct pet or Remove tags. Manual and automatic tags are
             together.
           </p>
-          <button class="quiet" data-panel="pets">Manage pets →</button>
+          <button class="quiet" data-panel="pets">Sorting settings →</button>
         </div>
       </section>
       <section id="pets-panel" class="panel hidden">
         <div class="section-heading">
           <div>
-            <h2>Automatic tagging, per pet.</h2>
+            <h2>Automatic sorting</h2>
             <p>
-              1. Teach with clear examples. 2. Enable automatic tagging. 3.
-              Check automatic tags and review uncertain matches.
+              Name pets and correct mistakes. The app handles recognition in the
+              background.
             </p>
           </div>
         </div>
-        <div id="pet-grid" class="pet-grid"></div>
-        <div class="automation-rules">
-          <strong>What happens when you enable it?</strong>
+        <div class="sorting-settings">
+          <div>
+            <strong id="sorting-mode-label"></strong>
+            <p id="sorting-mode-message"></p>
+          </div>
+          <label
+            >Sorting preference<select id="sorting-profile">
+              <option value="careful">Fewer mistakes</option>
+              <option value="balanced">Balanced</option>
+              <option value="broader">Sort more</option>
+            </select></label
+          >
+          <button id="save-sorting" class="primary">Save preference</button>
           <p>
-            The service rechecks the existing review queue and keeps checking
-            new photos. It writes a pet tag in Immich only when all three checks
-            pass. Each pet’s control is saved across restarts.
-          </p>
-          <p id="automation-thresholds"></p>
-          <p>
-            <strong>Made a mistake?</strong> Open Tagged, select photos, then
-            choose the correct pet or Remove tags.
+            “Sort more” includes less certain matches. Use a pet collection to
+            correct exceptions.
           </p>
         </div>
+        <div id="pet-grid" class="pet-grid"></div>
         <form id="pet-form" class="form-row">
           <label
             >Pet's name<input
@@ -271,9 +292,8 @@
         </form>
         <div class="tip">
           <p>
-            <strong>A good first gallery: 30–50 photos.</strong> Include
-            different angles, lighting, ages, and grooming. Keep a separate set
-            of photos for checking accuracy before turning on automatic tagging.
+            Every identity you confirm helps future sorting. Automatic results
+            do not count as your feedback; correcting one does.
           </p>
         </div>
       </section>
@@ -317,9 +337,13 @@
           Forget service token in this tab
         </button>
       </section>
+      <div id="group-undo" class="group-undo hidden" role="status">
+        <span id="group-undo-label"></span
+        ><button id="undo-group" class="secondary">Undo group</button>
+      </div>
       <footer class="main-footer">
         <span id="last-sync">Waiting for first sync</span
-        ><span id="tagging-state">Human review comes first</span>
+        ><span id="tagging-state">Automatic pet sorting</span>
       </footer>
     </main>
     <dialog id="login-dialog">
@@ -340,6 +364,24 @@
         <p id="login-error" class="error-text" role="alert"></p>
         <button class="primary" type="submit">Connect</button>
       </form>
+    </dialog>
+    <dialog id="group-dialog" class="group-dialog">
+      <div class="group-dialog-heading">
+        <div>
+          <h2 id="group-dialog-title"></h2>
+          <p>
+            Uncheck exceptions, then name the selected photos. Unchecked photos
+            stay for later.
+          </p>
+        </div>
+        <button id="close-group" class="secondary">Close</button>
+      </div>
+      <div class="group-dialog-actions">
+        <button id="group-toggle-all" class="secondary">Clear selection</button
+        ><strong id="group-selected-count"></strong>
+        <div id="group-dialog-pets" class="assignment-buttons"></div>
+      </div>
+      <div id="group-photo-grid" class="group-photo-grid"></div>
     </dialog>
     <div id="toast" role="status" class="toast hidden"></div>
   </body>

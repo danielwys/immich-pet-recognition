@@ -237,21 +237,19 @@ def test_bulk_partial_failures_allow_published_assignments_but_reject_invalid_ro
         )
 
 
-def test_existing_published_confirmations_can_become_examples_without_retagging(processed):
+def test_manual_identifications_automatically_teach_without_a_separate_enrollment_step(processed):
     detection = processed.store.one("SELECT id FROM detections")["id"]
     pet = processed.add_pet("Mochi", "dog")
     processed.decide(detection, pet["id"], "confirmed")
     processed.publish_one()
     with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
-        assert client.get("/api/pets").json()[0]["positive_count"] == 0
+        assert client.get("/api/pets").json()[0]["positive_count"] == 1
         assert (
             client.post(
-                "/api/references/batch",
-                json={
-                    "items": [{"detection_id": detection, "pet_id": pet["id"], "kind": "positive"}]
-                },
-            ).json()["saved"]
-            == 1
+                f"/api/detections/{detection}/decision",
+                json={"status": "confirmed", "pet_id": pet["id"]},
+            ).status_code
+            == 200
         )
         assert client.get("/api/pets").json()[0]["positive_count"] == 1
     assert not processed.publish_one()
@@ -447,6 +445,11 @@ def test_tagged_wang_wang_never_includes_rusty_suggestions_from_the_same_photo(p
     processed.store.execute("UPDATE jobs SET status='queued'")
     processed.process_one()
     second = processed.store.one("SELECT id FROM detections WHERE id<>?", (first,))["id"]
+    import numpy as np
+
+    processed.store.save_embedding(
+        second, processed.settings.recognizer_key, np.array([0, 1, 0], dtype=np.float32)
+    )
     processed.add_reference(rusty["id"], second, "positive")
     processed.rematch()
     with TestClient(create_app(processed.settings, processed), headers=AUTH) as client:
@@ -550,7 +553,9 @@ def test_human_assignment_overrides_wrong_species_in_single_and_bulk_review(proc
             "status": "confirmed",
         }
         pets = {pet["name"]: pet for pet in client.get("/api/pets").json()}
-        assert pets["Wang Wang"]["positive_count"] == int(learn)
+        assert (
+            pets["Wang Wang"]["positive_count"] == 1
+        )  # Legacy learn flags no longer change naming.
         assert pets["Cat example"]["positive_count"] == 0
         assert processed.store.state("gallery_revision") != revision
         assert processed.publish_one()

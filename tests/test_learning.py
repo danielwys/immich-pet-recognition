@@ -94,3 +94,43 @@ def test_adaptive_preview_is_read_only_and_activation_survives_restart(processed
         assert restarted.matching_options() == {"mode": "adaptive", "profile": "balanced"}
         assert restarted.policies()[pet["id"]]["threshold"] == 0.75
         assert client.put("/api/matching", json={"profile": "reckless"}).status_code == 422
+
+
+def test_older_manual_names_are_adopted_but_automatic_results_never_teach(processed):
+    pet = processed.add_pet("Rusty", "dog")
+    row = processed.store.one("SELECT id FROM detections")
+    processed.decide(row["id"], pet["id"], "confirmed", learn=False)
+    assert processed.store.one("SELECT count(*) n FROM reference_images")["n"] == 0
+    processed.adopt_manual_identifications()
+    assert processed.store.one("SELECT count(*) n FROM reference_images")["n"] == 1
+    revision = processed.store.state("gallery_revision")
+    processed.adopt_manual_identifications()
+    assert processed.store.state("gallery_revision") == revision
+    processed.store.execute("DELETE FROM reference_images")
+    processed.store.execute(
+        "INSERT INTO automatic_reviews VALUES (?,?)", (row["id"], processed.settings.recognizer_key)
+    )
+    processed.adopt_manual_identifications()
+    assert processed.store.one("SELECT count(*) n FROM reference_images")["n"] == 0
+
+
+def test_naming_a_pet_turns_on_automatic_sorting_without_an_enrollment_control(processed):
+    with TestClient(
+        create_app(processed.settings, processed), headers={"Authorization": "Bearer test-token"}
+    ) as client:
+        pet = client.post("/api/pets", json={"name": "Wang Wang", "species": "dog"}).json()
+        assert client.get("/api/pets").json()[0]["auto_tag"] is True
+        detection = processed.store.one("SELECT id FROM detections")["id"]
+        assert (
+            client.post(
+                f"/api/detections/{detection}/decision",
+                json={"status": "confirmed", "pet_id": pet["id"], "learn": False},
+            ).status_code
+            == 200
+        )
+        assert client.get("/api/pets").json()[0]["positive_count"] == 1
+        page = client.get("/").text
+        assert "learn-from-assignments" not in page
+        assert "Use as example" not in page
+        assert "validation" not in page
+        assert "training" not in page

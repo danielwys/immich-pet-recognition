@@ -1,11 +1,10 @@
 # Immich Pet Recognition
 
 A self-hosted pet recognition companion for Immich. Find dogs and cats once, cache their crops,
-compare them with your pets' reference galleries, and write confirmed identities as Immich tags.
+recognize your pets from the identities you confirm, and sort their photos with Immich tags.
 
-**Initial implementation.** The API adapter targets Immich 3.2+ and was developed against the
-3.3.1 OpenAPI contract. Automatic tagging is off by default. Similarity thresholds need calibration
-on your own photos; a score is not a probability. CUDA deployment must be verified on your NAS.
+The API adapter targets Immich 3.2+. CPU and CUDA Compose configurations are included.
+Newly named pets sort automatically; existing saved pause choices are preserved.
 
 ## What it does
 
@@ -13,12 +12,11 @@ on your own photos; a score is not a probability. CUDA deployment must be verifi
 - Incremental API polling and an existing-library scan.
 - RF-DETR Nano detection and Open Noodle Pet Recognition Large ONNX embeddings.
 - Separate, versioned detection and embedding caches; recognition changes reuse crops.
-- Multiple named pets, positive references, and per-pet negative examples.
-- A companion review UI, explicit confirmation, and idempotent `Pets/<name>` tag writeback.
+- Pet collections, learned matching policies, and groups of similar photos to review together.
+- Pet collections, compact group review, and idempotent `Pets/<name>` tag writeback.
 - No direct Immich database access. Stock Immich human recognition continues independently.
 
-Video, pet entries in People, workflow event hooks, model ensembles, and reference removal are
-future work. It is a single-instance service for one Immich account.
+Video, pet entries in People, workflow event hooks, and model ensembles are future work. It is a single-instance service for one Immich account.
 
 ## Try the interface locally
 
@@ -76,93 +74,68 @@ also use its smart search/human-face detection; GPU memory is shared with this s
    An empty service token does not disable authentication by itself: the service refuses to
    start unless you explicitly opt into direct access.
 
-6. Register your pet. Scan the library, then add 30–50 varied crops as references. Add look-alike
-   dogs as negative examples. Confirm matches manually; confirmed matches are tagged even with
-   automatic tagging disabled. Failed writes appear on the crop card; retry them in Processing.
+6. Name your pets and scan the library. Automatic sorting is on for newly registered pets.
+   Confirm a group when the identity is uncertain; every identification helps future sorting.
+   Open a pet collection to correct or remove a tag. Failed writes can be retried in Processing.
 
 The first real scan downloads pinned model weights from Hugging Face. RF-DETR Nano is small;
 the Large recognizer is approximately 1.2 GB. Models run locally after download. The CUDA
 runtime refuses silent CPU fallback if the requested provider fails to initialize.
 
-## Review and examples
+## Pet collections and group review
 
-Select photo crops and click a named pet button to assign the whole selection. There is no
-global pet dropdown. **Use my assignments as examples** is checked by default; leave it on
-to teach the gallery from your explicit assignments, or turn it off to reserve those photos
-for a separate accuracy check. Model-generated automatic matches never add their own examples.
+The home screen shows your pets and their collections, including how many photos were sorted
+automatically. Clear matches are tagged without individual confirmation. Matches waiting to sync
+to Immich are shown separately. The app learns from every manual name or correction; there is
+no reference checkbox, enrollment action, or training/validation choice. Older manual names are
+adopted automatically. Automatic results never teach themselves; confirming or correcting one does.
 
-Suggestions for visible photos use the latest cached example vectors immediately. A background
-pass refreshes rankings across the library without downloading photos or running detection again.
-The status above the review tabs shows **queued**, **preparing**, **rechecking** with a percentage
-and checked/total crop count, **complete**, or **failed** with a retry control. The percentage
-measures that pass, not the proportion of photos tagged. Completion is saved across restarts;
-an interrupted pass resumes as queued. Manual decisions and published tags survive rematching.
-The main counters count unique **untagged photos** and **tagged photos**, rather than animal
-crops. Expand **Why are photos still untagged?** to see crop counts, extra unassigned animals
-inside already-tagged photos, and the first unmet matching check for each pending crop.
-Tag changes waiting to sync to Immich are shown separately. Repeating a recheck with unchanged
-examples does not improve matching scores; uncertain matches need assignments or more varied examples.
-Use **Not [pet]** to exclude that identity while leaving the crop available for another pet;
-**Dismiss** removes the crop from the pending queue without guessing a negative identity.
+**Review groups** shows compact sets of similar photos. One answer names the whole group. Use
+**Review / remove exceptions** to uncheck photos that do not belong, then choose the pet; unchecked
+photos stay for later. Groups have a similarity bound between every pair of members, rather than
+chaining unrelated photos through intermediate matches. **Not one of my pets** excludes a group
+and uses that feedback to avoid similar mistakes. **Undo group** restores the latest group change
+and the automatic results from the pass it triggered. It survives restart for one hour; later edits
+to that group's identities or feedback prevent undo from overwriting newer work.
 
-The progress cards and every suggestion expose the three matching gates: **10 examples**, cosine
-similarity **0.85**, and separation from competing identities/negative examples **0.08** by default.
-Suggestions can appear with the first example. A **strong suggestion** passes all three gates;
-it is not a calibrated probability or a guarantee of correct identity. **Select strong suggestions**
-and **Accept suggested identities** approve the selected photos together, using each photo's
-own suggested pet. Selection is limited to the displayed page (up to 48 crops).
+Open a pet collection to see its completed manual and automatic tags. Select photos to change
+their identity or remove their tags. The correct tag is added before an old tag is removed; a tag
+stays if another confirmed animal in the same photo needs it. Manual naming also corrects a wrong
+cat/dog detection label. Removing a tag retains the photo. Failed tag changes remain visible and
+can be retried in Processing; pending removals survive restart and are verified against Immich.
 
-To teach from photos confirmed in the original interface, open **Tagged**, select photos,
-and choose **Use confirmed as examples**. This also works for already-tagged photos and does not
-rewrite their tags. Batch results report individual failures instead of silently losing them.
+**All photos** retains the detailed Untagged/Tagged views. Tagged contains current completed
+assignments only, with no unrelated suggestions from other animal crops in the same photo.
+More filters offers manual/automatic source, skipped photos, and additional unassigned animals
+inside already-tagged photos. Counters distinguish unique photos from animal crops.
 
-To correct an assignment, open **Tagged**, filter to the wrong pet, select the affected crops,
-and click the correct pet's name. Published tags can be reassigned. The correct tag is added,
-then the old tag is removed when no other confirmed animal in that photo still needs it.
-With the examples option enabled, the crop becomes a positive example for the correct pet and
-a negative example for the old pet when both pets have the same species. Conflicting positive examples are removed.
+## Automatic sorting
 
-The detector's cat/dog label is a guess, and never blocks a manual assignment. Choose any pet
-on a card or in a batch; assigning a dog to a crop detected as a cat also corrects that crop's
-species to dog in the same transaction. Incompatible old gallery examples are removed, and the
-normal examples checkbox controls whether to learn the new identity. Species corrections persist
-across restarts and cached rescans. Automatic matching still compares pets of the same species.
+**Sorting settings** offers **Fewer mistakes**, **Balanced**, and **Sort more**, plus per-pet
+pause controls. Preferences persist without a restart. A paused pet keeps its existing tags;
+unpublished automatic writes are canceled, while human assignments remain queued for publication.
+New pets default to automatic sorting on. Existing saved pause choices are preserved.
 
-To untag without assigning another pet, select confirmed crops and choose **Remove tags**, or
-use **Remove tag** on a card. This removes the assignment and its positive example and moves
-the crop out of the active queue (use **More filters → Show skipped photos** to find it); the photo itself is retained. Failed tag changes remain visible and
-can be retried in **Processing**. Pending removals survive restarts and are verified against Immich.
+Adaptive matching fits a separate boundary for each pet from explicit feedback. It tests each
+known photo with all of that photo's crops removed from every pet's gallery, uses other known pets
+and explicit rejections as contrasts, and searches for a boundary that recovers known identities
+without confusing them. Well separated identities use the observed gap between their score
+ranges instead of requiring near-duplicate similarity. The preferences change how much separation
+and past-label precision the search requires. The report describes checks on previous feedback;
+it is not a calibrated probability or a guarantee of accuracy on unseen animals. Contradictory
+identities remain for group review. The pretrained image encoder itself is not retrained.
 
-## Finding photos that still need tags
+Matching uses cached embeddings, without downloading photos or rerunning detection. The status
+above the collections shows queued/preparing/running percentage, checked/total crops, completion,
+and errors with retry. Percentage measures the current pass, not the proportion of photos tagged.
+Tag syncing is tracked separately. Interrupted passes recover on restart, and human decisions
+are never overwritten by rematching. Only the latest completed progress record is retained.
 
-Review opens on **Untagged**: photos without any pet tag published by the companion. **Tagged**
-combines manual and automatic tags in one view. A clear badge on each crop shows the existing
-pet tags. Tagged shows completed assignments only, with correction/removal actions. Selecting a pet
-shows that pet's saved assignments; unassigned animals and suggestions from the same photo are
-excluded. A photo containing several animals is no longer completely untagged once any animal has
-a published pet tag. To work on its remaining animals, open **Untagged → More filters → Include
-untagged animals in already tagged photos**. Queued or failed writes are never shown as completed.
-**More filters** also contains the optional manual/automatic distinction and **Show skipped photos**. The filter reports unique photo counts;
-the paginated cards are detected animal crops.
-
-## Automatic tagging
-
-Check performance on a held-out set that is not in the reference gallery. Tune the similarity
-threshold and separation margin to avoid confusing look-alikes. The initial values (0.85/0.08)
-are placeholders, not model-vendor recommendations or proven accuracy guarantees.
-
-Use **Pets & automation → Enable automatic tagging** separately for each pet. Controls are also available in the expandable automation section of the review screen. Changes persist in SQLite without restarting the service.
-Enabling rechecks pending matches in the existing library as well as new photos. **Pause** stops
-future automatic tags and cancels unpublished automatic matches; existing tags and human
-confirmations stay. **Tagged** combines manual and automatic results; **More filters → Tag source** narrows the view when auditing.
-The per-pet cards show example counts, automatic tags, and matches still waiting for review.
-
-A match must clear both thresholds and have at least `PET_MIN_REFERENCES` positive references.
-`PET_AUTO_TAG` remains the default for pets without a saved UI choice (false by default);
-an explicit per-pet choice takes precedence. Explicitly rejected or
-confirmed decisions survive rematching. Confirmed tags are additive; the service never removes
-unrelated tags. Published assignments can be corrected or removed from the review UI. Only explicit human assignments
-with the examples option enabled, or an explicit example action, change the reference gallery.
+`PET_MATCHING_MODE=adaptive` is the default. The read-only `/api/matching` report can preview a
+mode or preference before activation; `PUT /api/matching` saves the preference and rechecks the
+backlog. Advanced deployments can retain `fixed` mode using the old environment thresholds;
+0.85/0.08 are legacy placeholders, not model-vendor recommendations. `PET_AUTO_TAG` remains the
+fallback for older pets without a saved choice. Explicit per-pet choices take precedence.
 
 ## Cache, persistence, and upgrades
 

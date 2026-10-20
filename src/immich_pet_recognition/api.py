@@ -46,10 +46,15 @@ class MatchingUpdate(BaseModel):
     profile: Literal["careful", "balanced", "broader"] = "balanced"
 
 
+class GroupDecision(BaseModel):
+    pet_id: UUID | None = None
+    excluded: list[str] = Field(default_factory=list, max_length=200)
+    skip: bool = False
+
+
 class Decision(BaseModel):
     status: Literal["confirmed", "rejected"]
     pet_id: UUID | None = None
-    learn: bool = False
     expected_pet_id: UUID | None = None
 
 
@@ -146,6 +151,61 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
     def set_matching(body: MatchingUpdate):
         return service.set_matching_options(body.mode, body.profile)
 
+    @app.get("/api/collections", dependencies=auth)
+    def collections():
+        return service.collections()
+
+    @app.get("/api/groups", dependencies=auth)
+    def groups(
+        pet_id: UUID | None = None,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(12, ge=1, le=48),
+    ):
+        rows = service.groups()
+        if rows is None:
+            return {
+                "updating": True,
+                "items": [],
+                "total_groups": 0,
+                "total_photos": 0,
+                "total_crops": 0,
+            }
+        if pet_id:
+            rows = [row for row in rows if row["pet_id"] == str(pet_id)]
+        return {
+            "updating": False,
+            "items": [
+                {k: v for k, v in row.items() if k != "members"}
+                for row in rows[offset : offset + limit]
+            ],
+            "total_groups": len(rows),
+            "total_crops": sum(row["crop_count"] for row in rows),
+            "total_photos": len({member["asset_id"] for row in rows for member in row["members"]}),
+        }
+
+    @app.get("/api/groups/{group_id}", dependencies=auth)
+    def group_detail(group_id: str):
+        row = next((row for row in service.groups() or [] if row["id"] == group_id), None)
+        if not row:
+            raise HTTPException(409, "This group changed. Refresh to see the current photos.")
+        return row
+
+    @app.post("/api/groups/{group_id}/decision", dependencies=auth)
+    def group_decision(group_id: str, body: GroupDecision):
+        try:
+            return service.decide_group(
+                group_id, str(body.pet_id) if body.pet_id else None, body.excluded, body.skip
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+
+    @app.post("/api/groups/undo/{action_id}", dependencies=auth)
+    def undo_group(action_id: str):
+        try:
+            return service.undo_group(action_id)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+
     @app.put("/api/pets/{pet_id}/automation", dependencies=auth)
     def set_automation(pet_id: UUID, body: AutomationUpdate):
         try:
@@ -156,7 +216,9 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
     @app.post("/api/pets", dependencies=auth, status_code=201)
     def add_pet(body: PetCreate):
         try:
-            return service.add_pet(body.name, body.species)
+            pet = service.add_pet(body.name, body.species)
+            service.set_automation(pet["id"], True)
+            return pet
         except sqlite3.IntegrityError:
             raise HTTPException(409, "A pet with this name already exists") from None
 
@@ -171,7 +233,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
     @app.post("/api/references/batch", dependencies=auth)
     def bulk_references(body: ReferenceBatch):
         results = []
-        with service.model_lock:
+        with service.batch_updates():
             for item in body.items:
                 try:
                     service.add_reference(str(item.pet_id), item.detection_id, item.kind)
@@ -290,7 +352,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
                 detection_id,
                 str(body.pet_id) if body.pet_id else None,
                 body.status,
-                body.learn,
+                body.status == "confirmed",
                 str(body.expected_pet_id) if body.expected_pet_id else None,
             )
             return {"status": body.status, "writeback": "demo only" if settings.demo else "queued"}
@@ -305,7 +367,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
                     "detection_id": item.detection_id,
                     "pet_id": str(item.pet_id) if item.pet_id else None,
                     "status": item.status,
-                    "learn": item.learn,
+                    "learn": item.status == "confirmed",
                     "expected_pet_id": str(item.expected_pet_id) if item.expected_pet_id else None,
                 }
                 for item in body.items

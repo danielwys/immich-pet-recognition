@@ -21,8 +21,8 @@ def fit_policies(gallery, threshold, margin, minimum, profile="balanced"):
     """One rectangle per pet, fitted using only human-enrolled references.
 
     All crops of the query photo are removed from every pet's positive AND
-    negative gallery. Automatic assignments and opt-out confirmations never
-    become calibration labels. Explicit 'not this pet' feedback supplies contrasts.
+    negative gallery. Automatic assignments never become calibration labels.
+    Explicit 'not this pet' feedback supplies contrasts.
     """
     records = {}
     for pet in gallery:
@@ -98,18 +98,28 @@ def fit_policies(gallery, threshold, margin, minimum, profile="balanced"):
                 "balanced": (0.05, 0.025),
                 "broader": (0.01, 0.05),
             }[profile]
-            floor = (
-                max(0.45, float(np.quantile(positive_scores, quantile)) - allowance)
-                if (len(positive_scores))
-                else 1.01
-            )
+            floor = 1.01
+            if len(positive_scores):
+                positive_edge = float(np.quantile(positive_scores, quantile))
+                negative_edge = float(np.quantile(scores[~truth], 0.99))
+                # When identities are well separated, put the boundary in the
+                # observed gap instead of demanding near-duplicate similarity.
+                boundary = (positive_edge + negative_edge) / 2
+                if profile == "broader":
+                    boundary = positive_edge * 0.3 + negative_edge * 0.7
+                floor = (
+                    max(0.45, min(positive_edge - allowance, boundary))
+                    if (profile != "careful")
+                    else max(0.45, positive_edge)
+                )
             # Candidate boundaries include the observations on both sides of the
             # decision, with a bounded search for predictable gallery refresh time.
             score_values = np.unique(np.r_[floor, np.quantile(scores, np.linspace(0, 1, 65))])
-            gap_values = np.unique(np.r_[0.005, np.quantile(gaps, np.linspace(0, 1, 33))])
+            gap_floor = {"careful": 0.05, "balanced": 0.02, "broader": 0.005}[profile]
+            gap_values = np.unique(np.r_[gap_floor, np.quantile(gaps, np.linspace(0, 1, 33))])
             best = None
             for cutoff in score_values[score_values >= floor]:
-                for separation in gap_values[gap_values >= 0.005]:
+                for separation in gap_values[gap_values >= gap_floor]:
                     accepted = (scores >= cutoff) & (gaps >= separation)
                     correct = int(np.sum(accepted & truth))
                     wrong = int(np.sum(accepted & ~truth))
