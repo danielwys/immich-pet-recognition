@@ -205,3 +205,40 @@ def test_thumbnails_are_small_authenticated_immutable_and_cached(processed):
             ]
             == "private, no-store"
         )
+
+
+def test_saving_a_served_selection_never_rebuilds_the_library(service, monkeypatch):
+    groups = split_groups(service)
+    pet = service.add_pet("Rusty", "dog")
+    service.group_cache = None
+
+    def unavailable():
+        raise AssertionError("A human save must not rebuild or read all groups")
+
+    monkeypatch.setattr(service, "groups", unavailable)
+    result = service.decide_groups([groups[0]["id"]], pet["id"])
+    assert result["saved"] == 2
+
+
+def test_large_group_read_does_not_hold_the_human_decision_lock(service, monkeypatch):
+    rows = photos(service, 2)
+    pet = service.add_pet("Rusty", "dog")
+    entered, release = Event(), Event()
+    original = service.store.rows
+
+    def slow_rows(query, params=()):
+        if query.startswith("WITH tagged AS MATERIALIZED"):
+            entered.set()
+            assert release.wait(5)
+        return original(query, params)
+
+    monkeypatch.setattr(service.store, "rows", slow_rows)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        read = pool.submit(service.groups)
+        try:
+            assert entered.wait(3)
+            pool.submit(service.decide, rows[0]["id"], pet["id"], "confirmed").result(1)
+        finally:
+            release.set()
+        assert sum(group["photo_count"] for group in read.result(3)) == 1
+    assert sum(group["photo_count"] for group in service.groups()) == 1
