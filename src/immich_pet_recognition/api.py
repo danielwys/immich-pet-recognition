@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import secrets
 import sqlite3
@@ -13,11 +14,12 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field, field_validator
 
 from .config import Settings
-from .service import Service
+from .immich import asset_revision
+from .service import Service, eligible
 
 STATIC = Path(__file__).parent / "static"
 
@@ -347,6 +349,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         source: Literal["all", "manual", "automatic"] = "all",
         tagging: Literal["all", "untagged", "unassigned", "tagged"] = "all",
         include_dismissed: bool = True,
+        unique_photos: bool = False,
     ):
         clause = (
             "FROM detections d JOIN assets a ON a.id=d.asset_id "
@@ -398,8 +401,28 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         counts = service.store.one(
             "SELECT count(*) total,count(DISTINCT a.id) photo_total " + clause, params
         )
+        if unique_photos:
+            counts["crop_total"] = counts["total"]
+            counts["total"] = counts["photo_total"]
+            clause += " GROUP BY a.id"
+        related = (
+            (
+                "(SELECT json_group_array(dd.id) FROM detections dd JOIN reviews rr "
+                "ON rr.detection_id=dd.id WHERE dd.asset_id=d.asset_id AND dd.revision=a.revision "
+                "AND dd.detector=d.detector AND rr.model=r.model AND rr.pet_id IS r.pet_id "
+                "AND rr.status=r.status) assignment_ids,"
+                "(SELECT json_group_array(json_object('pet_id',names.id,'name',names.name)) FROM "
+                "(SELECT DISTINCT pp.id,pp.name FROM detections dd JOIN reviews rr "
+                "ON rr.detection_id=dd.id JOIN pets pp ON pp.id=rr.pet_id "
+                "WHERE dd.asset_id=d.asset_id AND dd.revision=a.revision "
+                "AND dd.detector=d.detector AND rr.model=r.model "
+                "AND rr.status='confirmed') names) identities,"
+            )
+            if unique_photos
+            else ""
+        )
         rows = service.store.rows(
-            "SELECT d.id,d.asset_id,d.species,d.score detector_score,d.box,a.name,"
+            "SELECT " + related + "d.id,d.asset_id,d.species,d.score detector_score,d.box,a.name,"
             "r.pet_id,r.score,r.margin,r.status,r.published,r.error,p.name pet_name,"
             "EXISTS(SELECT 1 FROM automatic_reviews ar WHERE ar.detection_id=r.detection_id "
             "AND ar.model=r.model) automatic,"
@@ -417,12 +440,55 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         )
         for row in rows:
             row["photo_tags"] = json.loads(row["photo_tags"])
+            if unique_photos:
+                row["assignment_ids"] = json.loads(row["assignment_ids"])
+                row["identities"] = json.loads(row["identities"])
         return {
             "items": service.recommendations(rows),
             **counts,
             "offset": offset,
             "limit": limit,
         }
+
+    @app.get("/api/detections/{detection_id}/photo", dependencies=auth)
+    def photo(detection_id: str, size: int = Query(320, ge=64, le=1600)):
+        row = service.store.one(
+            "SELECT d.asset_id,d.revision,d.crop FROM detections d JOIN assets a "
+            "ON a.id=d.asset_id WHERE d.id=? AND d.detector=? AND d.revision=a.revision",
+            (detection_id, settings.detector_key),
+        )
+        if row is None:
+            raise HTTPException(404, "Photo no longer matches this library entry")
+        previews = settings.data_dir / "photo-previews"
+        previews.mkdir(exist_ok=True)
+        key = hashlib.sha256((row["asset_id"] + ":" + row["revision"]).encode()).hexdigest()
+        target = previews / f"{key}-{size}.jpg"
+        if not target.is_file():
+            try:
+                if settings.demo:
+                    raw = (service.crops / row["crop"]).read_bytes()
+                else:
+                    asset = service.immich.asset(row["asset_id"])
+                    if not eligible(asset) or asset_revision(asset) != row["revision"]:
+                        raise HTTPException(404, "Photo changed or is unavailable")
+                    raw = service.immich.preview(row["asset_id"])
+                with Image.open(io.BytesIO(raw)) as source:
+                    image = ImageOps.exif_transpose(source).convert("RGB")
+                image.thumbnail((size, size))
+                with tempfile.NamedTemporaryFile(dir=previews, suffix=".jpg", delete=False) as tmp:
+                    temporary = Path(tmp.name)
+                try:
+                    image.save(temporary, "JPEG", quality=88 if size > 640 else 82, optimize=True)
+                    temporary.replace(target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            except HTTPException:
+                raise
+            except Exception as error:
+                raise HTTPException(502, service.safe_error(error)) from None
+        return FileResponse(
+            target, headers={"Cache-Control": "private, max-age=86400", "Vary": "Authorization"}
+        )
 
     @app.get("/api/detections/{detection_id}/crop", dependencies=auth)
     def crop(detection_id: str, size: int | None = Query(None, ge=64, le=1024)):

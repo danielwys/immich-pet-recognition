@@ -90,25 +90,34 @@ const imageObserver = new IntersectionObserver(
         target,
         target.dataset.cropId,
         Number(target.dataset.cropSize),
+        target.dataset.mediaKind,
       );
     });
   },
   { rootMargin: "300px" },
 );
-function image(id, alt, className = "", size = 320, immediate = false) {
+function image(
+  id,
+  alt,
+  className = "",
+  size = 320,
+  immediate = false,
+  media = "crop",
+) {
   const img = el("img", className);
   img.alt = alt || "";
   img.decoding = "async";
   img.dataset.cropId = id;
+  img.dataset.mediaKind = media;
   img.dataset.cropSize = size;
   if (id) {
-    if (immediate) scheduleCrop(img, id, size);
+    if (immediate) scheduleCrop(img, id, size, media);
     else imageObserver.observe(img);
   }
   return img;
 }
-function scheduleCrop(img, id, size) {
-  const key = `${id}:${size}`;
+function scheduleCrop(img, id, size, media = "crop") {
+  const key = `${media}:${id}:${size}`;
   const cached = cropCache.get(key);
   if (cached) {
     cropCache.delete(key);
@@ -121,7 +130,8 @@ function scheduleCrop(img, id, size) {
     return;
   }
   cropRequests.set(key, [img]);
-  cropQueue.push({ key, id, size });
+  if (size > 640) cropQueue.unshift({ key, id, size, media });
+  else cropQueue.push({ key, id, size, media });
   drainCrops();
 }
 function drainCrops() {
@@ -135,10 +145,13 @@ function drainCrops() {
       continue;
     }
     loadingImages++;
-    fetch(`/api/detections/${task.id}/crop?size=${task.size}`, {
-      priority: "low",
-      headers: token ? { Authorization: "Bearer " + token } : {},
-    })
+    fetch(
+      `/api/detections/${task.id}/${task.media === "photo" ? "photo" : "crop"}?size=${task.size}`,
+      {
+        priority: "low",
+        headers: token ? { Authorization: "Bearer " + token } : {},
+      },
+    )
       .then(async (response) => {
         if (!response.ok) throw new Error("Photo unavailable");
         const url = URL.createObjectURL(await response.blob());
@@ -163,6 +176,15 @@ function drainCrops() {
         drainCrops();
       });
   }
+}
+function photoImage(row, size = 320) {
+  return image(row.id, row.name, "", size, false, "photo");
+}
+function assignmentsFor(item) {
+  return item.assignment_ids || [item.id];
+}
+function photoFailed(item, failedIds) {
+  return assignmentsFor(item).some((id) => failedIds.has(id));
 }
 function operationId() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -428,7 +450,7 @@ async function renderLibrary(version) {
     const strip = el("div", "photo-strip");
     $("view").append(section, strip);
     const data = await api(
-      `detections?status=confirmed&tagging=all&pet_id=${pet.id}&sort=newest&limit=10`,
+      `detections?status=confirmed&tagging=all&pet_id=${pet.id}&sort=newest&limit=10&unique_photos=true`,
     );
     if (version !== routeVersion) return;
     libraryPreviews.set(pet.id, data.items);
@@ -439,7 +461,7 @@ async function renderLibrary(version) {
         () => openViewer(data.items, index),
         `Open ${row.name}`,
       );
-      tile.append(image(row.id, row.name));
+      tile.append(photoImage(row));
       strip.append(tile);
     });
   });
@@ -478,7 +500,7 @@ function renderAlbumShell() {
   }
   identity.append(title);
   top.append(identity);
-  if (!view.candidates) {
+  if (!view.candidates && view.petId) {
     const select = button("Select", "secondary", () => {
       selectMode = !selectMode;
       selected.clear();
@@ -515,14 +537,17 @@ function renderAlbumShell() {
       "",
       view.candidates
         ? `Uncheck anything that isn't ${pet.name}. Add the rest together.`
-        : "Select photos to move them or remove a name.",
+        : view.petId
+          ? "Select photos to move them or remove a name."
+          : "Open a photo to see its pets.",
     ),
   );
+  if (view.petId)
+    actions.append(button("Select shown", "text-button", selectAllVisible));
   actions.append(
-    button("Select shown", "text-button", selectAllVisible),
     button("↻", "text-button", () => reloadPhotos(), "Refresh photos"),
   );
-  if (!view.candidates) {
+  if (!view.candidates && view.petId) {
     const source = el("select");
     source.setAttribute("aria-label", "Photo source");
     [
@@ -597,6 +622,7 @@ async function loadItems(append = false, version = routeVersion) {
           offset: append ? current.offset : 0,
           sort: "newest",
           source: current.source,
+          unique_photos: true,
         },
   );
   if (current.petId) query.set("pet_id", current.petId);
@@ -708,7 +734,7 @@ function photoTile(item, index) {
     tile.append(mosaic);
     if (item.photo_count > 1)
       tile.append(el("span", "tile-count", "▣ " + number(item.photo_count)));
-  } else tile.append(image(item.id, item.name));
+  } else tile.append(photoImage(item));
   tile.append(el("span", "photo-check", selected.has(key) ? "✓" : ""));
   if (group)
     tile.append(
@@ -852,7 +878,7 @@ function restoreLocally(op, failedIds) {
   }
   lastSelected = -1;
   const restore = op.positions.filter(
-    ({ item }) => !failedIds || failedIds.has(item.id),
+    ({ item }) => !failedIds || photoFailed(item, failedIds),
   );
   restore.forEach(({ item }) =>
     (item.type === "group" ? removedGroups : removedPhotos).delete(item.id),
@@ -884,13 +910,15 @@ async function assignSelection(petId, skip = false) {
   const body = groups
     ? { group_ids: items.map((item) => item.id), pet_id: petId, skip }
     : {
-        items: items.map((item) => ({
-          detection_id: item.id,
-          pet_id: petId,
-          status: skip ? "pending" : "confirmed",
-          expected_pet_id: item.pet_id,
-          expected_status: item.status,
-        })),
+        items: items.flatMap((item) =>
+          assignmentsFor(item).map((id) => ({
+            detection_id: id,
+            pet_id: petId,
+            status: skip ? "pending" : "confirmed",
+            expected_pet_id: item.pet_id,
+            expected_status: item.status,
+          })),
+        ),
       };
   const op = {
     kind: groups ? "groups" : "photos",
@@ -930,9 +958,10 @@ const outbox = new window.PetActionQueue({
           });
           results.push(...part.results);
         } catch (error) {
-          error.failedIds = new Set(
-            op.body.items.slice(offset).map((item) => item.detection_id),
-          );
+          error.failedIds = new Set([
+            ...results.filter((row) => !row.saved).map((row) => row.id),
+            ...op.body.items.slice(offset).map((item) => item.detection_id),
+          ]);
           throw error;
         }
       }
@@ -1002,7 +1031,7 @@ const outbox = new window.PetActionQueue({
     boardGeneration++;
     if (error.failedIds)
       op.items
-        .filter((item) => !error.failedIds.has(item.id))
+        .filter((item) => !photoFailed(item, error.failedIds))
         .forEach((item) =>
           (item.type === "group" ? removedGroups : removedPhotos).delete(
             item.id,
@@ -1011,9 +1040,11 @@ const outbox = new window.PetActionQueue({
     if (op.kind !== "undo") {
       restoreLocally(op, error.failedIds);
       if (error.failedIds) {
-        op.items = op.items.filter((item) => error.failedIds.has(item.id));
+        op.items = op.items.filter((item) =>
+          photoFailed(item, error.failedIds),
+        );
         op.positions = op.positions.filter(({ item }) =>
-          error.failedIds.has(item.id),
+          photoFailed(item, error.failedIds),
         );
         if (op.body.items)
           op.body.items = op.body.items.filter((item) =>
@@ -1068,13 +1099,15 @@ $("undo-action").addEventListener("click", () => {
     });
   else {
     const body = {
-      items: original.items.map((item) => ({
-        detection_id: item.id,
-        pet_id: item.pet_id,
-        status: item.status,
-        expected_pet_id: original.petId || undefined,
-        expected_status: original.skip ? "pending" : "confirmed",
-      })),
+      items: original.items.flatMap((item) =>
+        assignmentsFor(item).map((id) => ({
+          detection_id: id,
+          pet_id: item.pet_id,
+          status: item.status,
+          expected_pet_id: original.petId || undefined,
+          expected_status: original.skip ? "pending" : "confirmed",
+        })),
+      ),
     };
     outbox.enqueue({
       kind: "undo",
@@ -1109,14 +1142,35 @@ function renderViewer() {
   if (!row) return;
   $("viewer-name").textContent = row.name || "Photo";
   const img = $("viewer-image");
-  img.removeAttribute("src");
+  const preview = cropCache.get(`photo:${row.id}:320`);
+  if (preview) img.src = preview;
+  else img.removeAttribute("src");
   img.alt = row.name || "Pet photo";
-  scheduleCrop(img, row.id, 1024);
+  scheduleCrop(img, row.id, 1280, "photo");
   $("viewer-previous").disabled = viewerIndex === 0;
   $("viewer-next").disabled = viewerIndex === viewerItems.length - 1;
   const actions = $("viewer-actions");
   actions.replaceChildren();
-  actions.append(el("span", "", row.pet_name || "Unidentified"));
+  actions.append(
+    el(
+      "span",
+      "",
+      row.identities?.map((identity) => identity.name).join(" · ") ||
+        row.pet_name ||
+        "Unidentified",
+    ),
+  );
+  if (view?.type === "album" && !view.petId) {
+    (row.identities || []).forEach((identity) =>
+      actions.append(
+        button("Open " + identity.name, "", () => {
+          $("viewer").close();
+          navigate("pet/" + identity.pet_id);
+        }),
+      ),
+    );
+    return;
+  }
   pets.forEach((pet) =>
     actions.append(
       button(pet.name, row.pet_id === pet.id ? "active" : "", () =>
@@ -1154,15 +1208,13 @@ function changeViewerPhoto(row, petId) {
     kind: "photos",
     path: "review/batch",
     body: {
-      items: [
-        {
-          detection_id: row.id,
-          pet_id: petId,
-          status: petId ? "confirmed" : "pending",
-          expected_pet_id: row.pet_id,
-          expected_status: row.status,
-        },
-      ],
+      items: assignmentsFor(row).map((id) => ({
+        detection_id: id,
+        pet_id: petId,
+        status: petId ? "confirmed" : "pending",
+        expected_pet_id: row.pet_id,
+        expected_status: row.status,
+      })),
     },
     items: [{ ...row, type: "photo" }],
     positions: [

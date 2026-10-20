@@ -17,7 +17,9 @@ named pets, and Unidentified; settings and activity are secondary destinations.
 Each **pet album** has a compact identity header and two tabs:
 
 - **Photos:** current manual and automatic identities together in a dense contact sheet.
-  Selecting incorrect photos reveals actions to move them to another pet or remove the name.
+  Albums show complete Immich photo previews once per photo, with the relevant pet assignments
+  retained underneath. Selecting incorrect photos reveals actions to move them to another pet or
+  remove that name while preserving other pets in the photo.
   Browsing an album never asks the user to confirm a different pet.
 - **More photos:** plausible additional matches, visibly separate from album members. The user
   selects exceptions and adds the remaining displayed photos in one action. This can cover
