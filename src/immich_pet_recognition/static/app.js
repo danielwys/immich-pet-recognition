@@ -483,8 +483,11 @@ function renderAlbumShell() {
   );
   if (pet) {
     const nameHeading = title.querySelector("h1");
-    nameHeading.classList.add("album-switcher");
-    nameHeading.append(el("span", "album-chevron", "⌄"));
+    const switcher = el("div", "album-switcher");
+    nameHeading.replaceWith(switcher);
+    const chevron = el("span", "album-chevron", "⌄");
+    chevron.setAttribute("aria-hidden", "true");
+    switcher.append(nameHeading, chevron);
     const picker = el("select", "album-pet-picker");
     picker.setAttribute("aria-label", "Switch pet");
     pets.forEach((other) => {
@@ -496,7 +499,7 @@ function renderAlbumShell() {
     picker.addEventListener("change", () =>
       navigate("pet/" + picker.value + (view.candidates ? "/more" : "")),
     );
-    nameHeading.append(picker);
+    switcher.append(picker);
   }
   identity.append(title);
   top.append(identity);
@@ -536,7 +539,7 @@ function renderAlbumShell() {
       "p",
       "",
       view.candidates
-        ? `Uncheck anything that isn't ${pet.name}. Add the rest together.`
+        ? `Select photos of ${pet.name}. Add them together.`
         : view.petId
           ? "Select photos to move them or remove a name."
           : "Open a photo to see its pets.",
@@ -625,7 +628,10 @@ async function loadItems(append = false, version = routeVersion) {
           unique_photos: true,
         },
   );
-  if (current.petId) query.set("pet_id", current.petId);
+  if (current.petId) {
+    query.set("pet_id", current.petId);
+    if (groups) query.set("near_match", "true");
+  }
   try {
     const data = await api((groups ? "groups?" : "detections?") + query);
     if (version !== routeVersion || current !== view) return;
@@ -649,7 +655,6 @@ async function loadItems(append = false, version = routeVersion) {
       : items;
     view.offset = (append ? view.offset : 0) + data.items.length;
     view.total = groups ? data.total_groups : data.total;
-    if (current.candidates) items.forEach((item) => selected.add(keyOf(item)));
     renderGrid();
     renderSelection();
     $("load-more").classList.toggle("hidden", view.offset >= view.total);

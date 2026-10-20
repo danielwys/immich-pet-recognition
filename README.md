@@ -85,15 +85,16 @@ runtime refuses silent CPU fallback if the requested provider fails to initializ
 ## Your pet library
 
 **Library** opens with pet portraits and photo previews. Open an album to browse its **Photos**:
-manual and automatic identities appear together, without confirmation buttons on every image.
+manual and automatic identities appear together as complete Immich photo previews. Each photo
+appears once, including photos with several animals; identification close-ups stay in Unidentified.
 Select incorrect results to move them to another pet or remove their name. Removing a name
 retains the photo. The correct tag is added before an old tag is removed; a tag stays if another
 confirmed animal in the same photo needs it. Manual naming also corrects a wrong cat/dog label.
 
-An album's **More photos** tab brings plausible additional matches into that pet's context.
-Select exceptions and use **Add remaining photos** to add the rest of the displayed candidates
-in one action, including candidates from several internal similarity groups. Exceptions remain
-unidentified. Suggestions are separate from completed album members until added.
+An album's **More photos** tab shows its closest plausible additional matches, ordered by relevance.
+Select matching photos and add them to the pet together, including photos from several internal
+similarity groups. Select shown is available for larger batches; nothing is preselected for you.
+Other animals remain in Unidentified. Suggestions stay separate from saved album members until added.
 
 **Unidentified** is a visual contact sheet of similar photos. Select several groups and name them
 together using the fixed assignment bar, rather than answering the same pet question for each

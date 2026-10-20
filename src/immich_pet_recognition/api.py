@@ -210,10 +210,30 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         pet_id: UUID | None = None,
         offset: int = Query(0, ge=0),
         limit: int = Query(12, ge=1, le=48),
+        near_match: bool = False,
     ):
         rows = service.groups()
         if pet_id:
             rows = [row for row in rows if row["pet_id"] == str(pet_id)]
+            if near_match:
+                rule = service.policies().get(str(pet_id), {})
+                floor = max(0.35, rule.get("threshold", settings.match_threshold) - 0.075)
+
+                def scores(group):
+                    return [
+                        member["score"]
+                        for member in group["members"]
+                        if member["pet_id"] == str(pet_id)
+                    ]
+
+                rows = [row for row in rows if max(scores(row), default=0) >= floor]
+                rows.sort(
+                    key=lambda row: (
+                        -sum(scores(row)) / len(scores(row)),
+                        -row["photo_count"],
+                        row["id"],
+                    )
+                )
         return {
             "updating": service.suggestions_pending(),
             "items": [

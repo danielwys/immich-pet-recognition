@@ -22,7 +22,8 @@ Each **pet album** has a compact identity header and two tabs:
   remove that name while preserving other pets in the photo.
   Browsing an album never asks the user to confirm a different pet.
 - **More photos:** plausible additional matches, visibly separate from album members. The user
-  selects exceptions and adds the remaining displayed photos in one action. This can cover
+  selects matching photos and adds them in one action; Select shown supports larger batches.
+  Suggestions are relevance-ranked, and nothing is preselected. This can cover
   several internal groups; the user need not repeatedly identify the same pet.
 
 **Unidentified** shows visual groups in a compact contact sheet. Multiple groups can be selected
@@ -59,7 +60,7 @@ Do not place a statistics wall or full sorting report above every photo view.
 | --- | --- |
 | Find photos of a pet | Library → pet → Photos. |
 | Fix wrong identities | Select photos in that album → choose the correct pet or remove the name. |
-| Add more plausible matches | Pet → More photos → select exceptions → Add remaining photos. |
+| Add more plausible matches | Pet → More photos → select matching photos → Add to the pet. |
 | Name several unidentified groups | Unidentified → select groups → choose a pet once. |
 | Inspect a mixed group | Open it, inspect members, and exclude photos that do not belong. |
 | Recover from a mistaken batch | Use the immediately available Undo action. |

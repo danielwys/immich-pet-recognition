@@ -107,3 +107,26 @@ def test_album_source_filter_still_collects_all_of_that_photos_current_identity(
         assert response.status_code == 200
         assert response.json()["total"] == 1
         assert set(response.json()["items"][0]["assignment_ids"]) == set(ids)
+
+
+def test_pet_suggestions_are_plausible_and_relevance_ordered_without_changing_automation(service):
+    import numpy as np
+    from test_groups import photos
+
+    rows = photos(service, 4)
+    pet = service.add_pet("Wang Wang", "dog")
+    for index, row in enumerate(rows):
+        vector = np.eye(3, dtype=np.float32)[index // 2]
+        service.store.save_embedding(row["id"], service.settings.recognizer_key, vector)
+        service.store.execute(
+            "UPDATE reviews SET pet_id=?,score=? WHERE detection_id=?",
+            (pet["id"], [0.82, 0.81, 0.35, 0.34][index], row["id"]),
+        )
+    before = service.store.rows("SELECT * FROM reviews ORDER BY detection_id")
+    with TestClient(create_app(service.settings, service), headers=AUTH) as client:
+        all_groups = client.get("/api/groups?pet_id=" + pet["id"]).json()
+        relevant = client.get("/api/groups?pet_id=" + pet["id"] + "&near_match=true").json()
+        assert all_groups["total_photos"] == 4 and relevant["total_photos"] == 2
+        assert relevant["items"][0]["samples"][0]["score"] >= 0.81
+        assert service.store.rows("SELECT * FROM reviews ORDER BY detection_id") == before
+        assert client.get("/api/groups").json()["total_photos"] == 4
