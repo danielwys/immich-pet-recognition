@@ -1009,6 +1009,10 @@ const outbox = new window.PetActionQueue({
       sessionStorage.setItem("pet-dismissed-undo", dismissedUndoId);
     }
     if (op.kind === "undo") {
+      if (op.path.startsWith("groups/undo/")) {
+        dismissedUndoId = op.path.split("/").at(-1);
+        sessionStorage.setItem("pet-dismissed-undo", dismissedUndoId);
+      }
       lastUndo = null;
       status.undo_group = null;
       restoreLocally(op.original);

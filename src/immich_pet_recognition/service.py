@@ -1124,1499 +1124,427 @@ class Service:
                         "WHERE detection_id=? AND model=?",
                         (
                             None if skip else pet_id,
-                            "rejected" if skip …6924 tokens truncated…      loadingImages--;
-        drainCrops();
-      });
-  }
-}
-function photoImage(row, size = 320) {
-  return image(row.id, row.name, "", size, false, "photo");
-}
-function assignmentsFor(item) {
-  return item.assignment_ids || [item.id];
-}
-function photoFailed(item, failedIds) {
-  return assignmentsFor(item).some((id) => failedIds.has(id));
-}
-function operationId() {
-  if (crypto.randomUUID) return crypto.randomUUID();
-  return [...crypto.getRandomValues(new Uint8Array(16))]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-function keyOf(item) {
-  return item.type === "group" ? "g:" + item.id : "d:" + item.id;
-}
-function photoIds(items) {
-  return new Set(
-    items.flatMap((item) =>
-      item.type === "group"
-        ? item.asset_ids || item.samples.map((row) => row.asset_id)
-        : [item.asset_id],
-    ),
-  );
-}
-function selectionItems() {
-  return (view?.items || []).filter((item) => selected.has(keyOf(item)));
-}
-function navigate(hash) {
-  location.hash = hash;
-}
-function route() {
-  const parts = (location.hash.slice(1) || "library").split("/");
-  if (parts[0] === "pet" && petById(parts[1]))
-    return {
-      type: "album",
-      petId: parts[1],
-      candidates: parts[2] === "more",
-      key: parts.join("/"),
-    };
-  if (parts[0] === "unidentified")
-    return {
-      type: "unidentified",
-      petId: parts[1] || "",
-      key: parts.join("/"),
-    };
-  if (parts[0] === "photos")
-    return { type: "album", petId: "", candidates: false, key: "photos" };
-  if (["settings", "activity"].includes(parts[0]))
-    return { type: parts[0], key: parts[0] };
-  return { type: "library", key: "library" };
-}
-function heading(title, subtitle) {
-  const container = el("div", "page-heading"),
-    text = el("div");
-  text.append(el("h1", "", title));
-  if (subtitle) text.append(el("p", "", subtitle));
-  container.append(text);
-  $("view").append(container);
-  return container;
-}
-function empty(container, title, detail) {
-  const message = el("div", "empty");
-  message.append(
-    el("div", "empty-mark", "◌"),
-    el("h2", "", title),
-    el("p", "", detail),
-  );
-  container.append(message);
-}
-function renderNavigation() {
-  const nav = $("pet-navigation");
-  nav.replaceChildren();
-  pets.forEach((pet) => {
-    const a = link("", "#pet/" + pet.id, "side-link");
-    a.append(
-      image(pet.cover_id, "", "nav-avatar", 160),
-      el("span", "", pet.name),
-      el("small", "nav-number", number(pet.photo_count)),
-    );
-    nav.append(a);
-  });
-  $("unidentified-count").textContent = number(
-    status.review_summary?.untagged_photos,
-  );
-  document.querySelectorAll(".side-link,.mobile-navigation a").forEach((a) => {
-    const current = location.hash || "#library";
-    a.classList.toggle(
-      "active",
-      a.hash === current ||
-        (a.hash.startsWith("#pet/") && current.startsWith(a.hash)) ||
-        (a.hash === "#unidentified" && current.startsWith(a.hash)),
-    );
-  });
-}
-function renderActivity() {
-  const check = status.recheck || {},
-    queued = outbox.pending;
-  const active = ["queued", "preparing", "running"].includes(check.state);
-  const syncing = status.review_summary?.pending_tag_changes || 0;
-  const failed =
-    outbox.failed.length || status.last_error || check.state === "failed";
-  $("activity-label").textContent = queued
-    ? `Saving ${plural(queued, "change")}`
-    : failed
-      ? "Needs attention"
-      : active
-        ? `Organizing${check.percent != null ? " · " + check.percent + "%" : "…"}`
-        : syncing
-          ? `Syncing ${plural(syncing, "photo")}`
-          : "Up to date";
-  $("activity-indicator").classList.toggle(
-    "working",
-    Boolean(queued || active || syncing),
-  );
-  $("activity-indicator").classList.toggle("failed", Boolean(failed));
-  $("demo-banner").classList.toggle("hidden", !status.demo);
-  $("error-banner").classList.toggle("hidden", !status.last_error);
-  $("error-banner").textContent = status.last_error || "";
-  renderUndo();
-}
-async function refreshStatus() {
-  if (polling) return;
-  polling = true;
-  try {
-    const [nextStatus, nextPets, groups] = await Promise.all([
-      api("status"),
-      api("collections"),
-      api("groups?limit=1"),
-    ]);
-    unidentifiedCount = groups.total_photos;
-    status = nextStatus;
-    pets = nextPets;
-    if (
-      !lastUndo &&
-      status.undo_group &&
-      status.undo_group.id !== dismissedUndoId
-    )
-      lastUndo = {
-        kind: "group",
-        id: status.undo_group.id,
-        label: status.undo_group.skip
-          ? "Photos hidden"
-          : "Added to " + (petById(status.undo_group.pet_id)?.name || "pet"),
-      };
-    renderNavigation();
-    updateAlbumCount();
-    renderActivity();
-    if (view?.type === "activity") renderActivityPage();
-  } finally {
-    polling = false;
-  }
-}
-let albumsRefreshing = false;
-function updateAlbumCount() {
-  const count = document.querySelector(".album-title p");
-  if (count && view?.petId && petById(view.petId))
-    count.textContent = plural(petById(view.petId).photo_count, "photo");
-}
-async function refreshAlbums() {
-  if (albumsRefreshing) return;
-  albumsRefreshing = true;
-  try {
-    pets = await api("collections");
-    renderNavigation();
-    updateAlbumCount();
-  } finally {
-    albumsRefreshing = false;
-  }
-}
-async function openRoute() {
-  const version = ++routeVersion;
-  selected.clear();
-  selectMode = false;
-  lastSelected = -1;
-  view = {
-    ...route(),
-    items: [],
-    total: 0,
-    offset: 0,
-    loading: false,
-    source: "all",
-  };
-  $("view").replaceChildren();
-  renderSelection();
-  renderNavigation();
-  const current = view;
-  if (current.type === "library") await renderLibrary(version);
-  else if (current.type === "album") {
-    renderAlbumShell();
-    await loadItems(false, version);
-  } else if (current.type === "unidentified") {
-    renderUnidentifiedShell();
-    await loadItems(false, version);
-  } else if (current.type === "settings") renderSettings();
-  else if (current.type === "activity") renderActivityPage();
-  if (version === routeVersion)
-    window.scrollTo({ top: 0, behavior: "instant" });
-}
-async function renderLibrary(version) {
-  const top = heading("Library");
-  top.append(link("All pet photos", "#photos", "text-button"));
-  const covers = el("div", "pet-covers");
-  $("view").append(covers);
-  pets.forEach((pet) => {
-    const cover = button(
-      "",
-      "pet-cover",
-      () => navigate("pet/" + pet.id),
-      `Open ${pet.name}`,
-    );
-    if (pet.cover_id) cover.append(image(pet.cover_id, pet.name, "", 640));
-    else cover.append(el("div", "cover-initial", pet.name[0]));
-    const caption = el("div", "cover-caption");
-    caption.append(
-      el("h2", "", pet.name),
-      el("p", "", plural(pet.photo_count, "photo")),
-    );
-    cover.append(caption);
-    covers.append(cover);
-  });
-  if (!pets.length) {
-    empty(
-      covers,
-      "Meet your first pet",
-      "Add a name to start collecting their photos.",
-    );
-    covers.append(link("Add a pet", "#settings", "primary"));
-  }
-  const unknown = el("div", "section-title");
-  unknown.append(
-    el("h2", "", "Unidentified"),
-    link("Browse photos →", "#unidentified", "text-button"),
-  );
-  $("view").append(unknown);
-  const line = el(
-    "p",
-    "photo-caption-note",
-    "A place for photos without a name. Organize them whenever you like.",
-  );
-  $("view").append(line);
-  const unknownStrip = el("div", "photo-strip");
-  $("view").append(unknownStrip);
-  const unknownPromise = api("groups?limit=8").then((data) => {
-    if (version !== routeVersion) return;
-    unidentifiedCount = data.total_photos;
-    $("unidentified-count").textContent = number(unidentifiedCount);
-    data.items.slice(0, 8).forEach((group) => {
-      const tile = button(
-        "",
-        "photo-tile",
-        () => navigate("unidentified"),
-        `Browse ${plural(group.photo_count, "unidentified photo")}`,
-      );
-      tile.append(image(group.samples[0]?.id, group.samples[0]?.name));
-      if (group.photo_count > 1)
-        tile.append(el("span", "tile-count", group.photo_count + " photos"));
-      unknownStrip.append(tile);
-    });
-    if (!data.items.length)
-      line.textContent = "All your detected pet photos have a name.";
-  });
-  const strips = pets.map(async (pet) => {
-    const section = el("div", "section-title");
-    section.append(
-      el("h2", "", pet.name),
-      link("View album →", "#pet/" + pet.id, "text-button"),
-    );
-    const strip = el("div", "photo-strip");
-    $("view").append(section, strip);
-    const data = await api(
-      `detections?status=confirmed&tagging=all&pet_id=${pet.id}&sort=newest&limit=10&unique_photos=true`,
-    );
-    if (version !== routeVersion) return;
-    libraryPreviews.set(pet.id, data.items);
-    data.items.forEach((row, index) => {
-      const tile = button(
-        "",
-        "photo-tile",
-        () => openViewer(data.items, index),
-        `Open ${row.name}`,
-      );
-      tile.append(photoImage(row));
-      strip.append(tile);
-    });
-  });
-  await Promise.allSettled([unknownPromise, ...strips]);
-}
-function renderAlbumShell() {
-  const pet = petById(view.petId),
-    top = el("div", "page-heading");
-  const identity = el("div", "album-heading");
-  if (pet) identity.append(image(pet.cover_id, "", "album-avatar", 160));
-  const title = el("div", "album-title");
-  title.append(
-    el("h1", "", pet?.name || "All pet photos"),
-    el(
-      "p",
-      "",
-      pet ? plural(pet.photo_count, "photo") : "Your named pets, together",
-    ),
-  );
-  if (pet) {
-    const nameHeading = title.querySelector("h1");
-    const switcher = el("div", "album-switcher");
-    nameHeading.replaceWith(switcher);
-    const chevron = el("span", "album-chevron", "⌄");
-    chevron.setAttribute("aria-hidden", "true");
-    switcher.append(nameHeading, chevron);
-    const picker = el("select", "album-pet-picker");
-    picker.setAttribute("aria-label", "Switch pet");
-    pets.forEach((other) => {
-      const option = el("option", "", other.name);
-      option.value = other.id;
-      picker.append(option);
-    });
-    picker.value = pet.id;
-    picker.addEventListener("change", () =>
-      navigate("pet/" + picker.value + (view.candidates ? "/more" : "")),
-    );
-    switcher.append(picker);
-  }
-  identity.append(title);
-  top.append(identity);
-  if (!view.candidates && view.petId) {
-    const select = button("Select", "secondary", () => {
-      selectMode = !selectMode;
-      selected.clear();
-      renderGrid();
-      renderSelection();
-      select.textContent = selectMode ? "Done" : "Select";
-    });
-    select.id = "album-select";
-    top.append(select);
-  }
-  $("view").append(top);
+                            "rejected" if skip else "confirmed",
+                            detection_id,
+                            self.settings.recognizer_key,
+                        ),
+                    )
+                    if skip:
+                        conn.execute(
+                            "INSERT INTO reference_images SELECT id,?,'negative' FROM pets "
+                            "WHERE species=? ON CONFLICT(pet_id,detection_id) "
+                            "DO UPDATE SET kind='negative'",
+                            (detection_id, row["species"]),
+                        )
+                    else:
+                        conn.execute(
+                            "DELETE FROM reference_images WHERE detection_id=? "
+                            "AND kind='positive' AND pet_id<>?",
+                            (detection_id, pet_id),
+                        )
+                        conn.execute(
+                            "INSERT INTO reference_images VALUES (?,?,'positive') "
+                            "ON CONFLICT(pet_id,detection_id) DO UPDATE SET kind='positive'",
+                            (pet_id, detection_id),
+                        )
+                        if row["pet_id"] and row["pet_id"] != pet_id:
+                            conn.execute(
+                                "INSERT INTO reference_images SELECT id,?,'negative' FROM pets "
+                                "WHERE id=? AND species=? ON CONFLICT(pet_id,detection_id) "
+                                "DO UPDATE SET kind='negative'",
+                                (detection_id, row["pet_id"], pet["species"]),
+                            )
+                    row["after_references"] = [
+                        dict(ref)
+                        for ref in conn.execute(
+                            "SELECT pet_id,kind FROM reference_images WHERE detection_id=? "
+                            "ORDER BY pet_id,kind",
+                            (detection_id,),
+                        )
+                    ]
+                self._review_changed(conn)
+            self.gallery_changed()
+            action = {
+                "id": uuid.uuid4().hex,
+                "pet_id": pet_id,
+                "skip": skip,
+                "rows": before,
+                "revision": self.store.state("gallery_revision", "0"),
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+            self.store.set_state("last_group_action", json.dumps(action))
+            return {
+                "saved": len(before),
+                "skipped": len(ids) - len(before),
+                "photos": len({row["asset_id"] for row in before}),
+                "undo_id": action["id"],
+            }
 
-  if (pet) {
-    const tabs = el("nav", "album-tabs");
-    tabs.setAttribute("aria-label", "Album views");
-    const saved = link(
-      "Photos",
-      "#pet/" + pet.id,
-      !view.candidates ? "active" : "",
-    );
-    const more = link(
-      "More photos",
-      "#pet/" + pet.id + "/more",
-      view.candidates ? "active" : "",
-    );
-    tabs.append(saved, more);
-    $("view").append(tabs);
-  }
-  const toolbar = el("div", "view-toolbar"),
-    actions = el("div", "toolbar-actions");
-  toolbar.append(
-    el(
-      "p",
-      "",
-      view.candidates
-        ? `Select photos of ${pet.name}. Add them together.`
-        : view.petId
-          ? "Select photos to move them or remove a name."
-          : "Open a photo to see its pets.",
-    ),
-  );
-  if (view.petId)
-    actions.append(button("Select shown", "text-button", selectAllVisible));
-  actions.append(
-    button("↻", "text-button", () => reloadPhotos(), "Refresh photos"),
-  );
-  if (!view.candidates && view.petId) {
-    const source = el("select");
-    source.setAttribute("aria-label", "Photo source");
-    [
-      ["all", "All photos"],
-      ["automatic", "Automatic"],
-      ["manual", "Named by you"],
-    ].forEach(([value, text]) => {
-      const option = el("option", "", text);
-      option.value = value;
-      source.append(option);
-    });
-    source.addEventListener("change", () => {
-      view.source = source.value;
-      reloadPhotos();
-    });
-    actions.prepend(source);
-  }
-  toolbar.append(actions);
-  $("view").append(toolbar);
-  addGrid();
-}
-function renderUnidentifiedShell() {
-  heading("Unidentified", "Select photos. Give them a name together.");
-  const toolbar = el("div", "view-toolbar"),
-    chips = el("nav", "filter-chips");
-  chips.setAttribute("aria-label", "Suggested pet");
-  [["", "All photos"], ...pets.map((pet) => [pet.id, pet.name])].forEach(
-    ([id, name]) =>
-      chips.append(
-        link(
-          name,
-          "#unidentified" + (id ? "/" + id : ""),
-          "filter-chip" + (id === view.petId ? " active" : ""),
-        ),
-      ),
-  );
-  const actions = el("div", "toolbar-actions");
-  actions.append(
-    button("Select shown", "text-button", selectAllVisible),
-    button("↻", "text-button", reloadPhotos, "Refresh photos"),
-  );
-  toolbar.append(chips, actions);
-  $("view").append(toolbar);
-  addGrid();
-}
-function addGrid() {
-  const grid = el("div", "photo-grid");
-  grid.id = "photo-grid";
-  grid.setAttribute("aria-label", "Photos");
-  for (let i = 0; i < 18; i++) grid.append(el("div", "skeleton"));
-  const more = button("Show more photos", "secondary load-more", () =>
-    loadItems(true),
-  );
-  more.id = "load-more";
-  more.classList.add("hidden");
-  $("view").append(grid, more);
-}
-async function loadItems(append = false, version = routeVersion) {
-  if (view.loading) return;
-  view.loading = true;
-  const generation = boardGeneration;
-  let retryRead = false;
-  const current = view,
-    groups = current.type === "unidentified" || current.candidates;
-  const query = new URLSearchParams(
-    groups
-      ? { limit: 48, offset: append ? current.offset : 0 }
-      : {
-          status: "confirmed",
-          tagging: "all",
-          limit: 72,
-          offset: append ? current.offset : 0,
-          sort: "newest",
-          source: current.source,
-          unique_photos: true,
-        },
-  );
-  if (current.petId) {
-    query.set("pet_id", current.petId);
-    if (groups) query.set("near_match", "true");
-  }
-  try {
-    const data = await api((groups ? "groups?" : "detections?") + query);
-    if (version !== routeVersion || current !== view) return;
-    if (generation !== boardGeneration) {
-      retryRead = true;
-      return;
-    }
-    if (groups) {
-      unidentifiedCount = data.total_photos;
-      $("unidentified-count").textContent = number(unidentifiedCount);
-    }
-    const items = data.items
-      .map((item) => ({ ...item, type: groups ? "group" : "photo" }))
-      .filter((item) =>
-        groups ? !removedGroups.has(item.id) : !removedPhotos.has(item.id),
-      );
-    const existing = new Set(append ? view.items.map(keyOf) : []);
-    lastSelected = -1;
-    view.items = append
-      ? [...view.items, ...items.filter((item) => !existing.has(keyOf(item)))]
-      : items;
-    view.offset = (append ? view.offset : 0) + data.items.length;
-    view.total = groups ? data.total_groups : data.total;
-    renderGrid();
-    renderSelection();
-    $("load-more").classList.toggle("hidden", view.offset >= view.total);
-  } catch (error) {
-    if (version === routeVersion) {
-      if (!view.items.length) {
-        $("photo-grid").replaceChildren();
-        empty($("photo-grid"), "Photos could not load", error.message);
-      } else showError(error);
-    }
-  } finally {
-    current.loading = false;
-    if (retryRead && current === view && version === routeVersion)
-      loadItems(append, version).catch(showError);
-  }
-}
-function reloadPhotos() {
-  if (!view || view.loading) return;
-  selected.clear();
-  view.offset = 0;
-  return loadItems(false);
-}
-function renderGrid() {
-  const grid = $("photo-grid");
-  if (!grid) return;
-  grid.classList.toggle(
-    "selecting",
-    Boolean(
-      selectMode ||
-        view.candidates ||
-        view.type === "unidentified" ||
-        selected.size,
-    ),
-  );
-  grid.replaceChildren();
-  view.items.forEach((item, index) => grid.append(photoTile(item, index)));
-  if (!view.items.length)
-    empty(
-      grid,
-      view.candidates
-        ? "No more suggestions here"
-        : view.type === "unidentified"
-          ? "Nothing unidentified here"
-          : "No photos yet",
-      view.candidates
-        ? "New matches will appear as your library grows."
-        : view.type === "unidentified"
-          ? "Your photos are already in pet albums."
-          : "Photos will appear here as they are named.",
-    );
-}
-function photoTile(item, index) {
-  const key = keyOf(item),
-    group = item.type === "group";
-  const tile = el("div", "photo-tile" + (selected.has(key) ? " selected" : ""));
-  tile.dataset.key = key;
-  tile.tabIndex = 0;
-  tile.setAttribute("role", group || selectMode ? "checkbox" : "button");
-  tile.setAttribute(
-    "aria-label",
-    group
-      ? `Select ${plural(item.photo_count, "photo")}${item.pet_name ? " suggested as " + item.pet_name : ""}`
-      : `Open ${item.name}`,
-  );
-  if (group || selectMode)
-    tile.setAttribute("aria-checked", String(selected.has(key)));
-  const act = (event) => {
-    if (group || selectMode || selected.size)
-      toggleItem(item, index, event.shiftKey);
-    else openViewer(view.items, index);
-  };
-  tile.addEventListener("click", act);
-  tile.addEventListener("keydown", (event) => {
-    if (event.target === tile && ["Enter", " "].includes(event.key)) {
-      event.preventDefault();
-      act(event);
-    }
-  });
-  if (group) {
-    const mosaic = el("div", "tile-mosaic");
-    item.samples.forEach((row) => mosaic.append(image(row.id, row.name)));
-    tile.append(mosaic);
-    if (item.photo_count > 1)
-      tile.append(el("span", "tile-count", "▣ " + number(item.photo_count)));
-  } else tile.append(photoImage(item));
-  tile.append(el("span", "photo-check", selected.has(key) ? "✓" : ""));
-  if (group)
-    tile.append(
-      button(
-        "⤢",
-        "tile-zoom",
-        () => openDetail(item),
-        `Inspect ${plural(item.photo_count, "similar photo")}`,
-      ),
-    );
-  return tile;
-}
-function toggleItem(item, index, range = false) {
-  const value = !selected.has(keyOf(item));
-  if (range && lastSelected >= 0) {
-    for (
-      let i = Math.min(index, lastSelected);
-      i <= Math.min(view.items.length - 1, Math.max(index, lastSelected));
-      i++
-    ) {
-      const key = keyOf(view.items[i]);
-      if (value) selected.add(key);
-      else selected.delete(key);
-    }
-  } else if (value) selected.add(keyOf(item));
-  else selected.delete(keyOf(item));
-  lastSelected = index;
-  syncSelectionTiles();
-  renderSelection();
-}
-function syncSelectionTiles() {
-  const grid = $("photo-grid");
-  if (!grid) return;
-  grid.classList.toggle(
-    "selecting",
-    Boolean(
-      selectMode ||
-        view.candidates ||
-        view.type === "unidentified" ||
-        selected.size,
-    ),
-  );
-  grid.querySelectorAll(".photo-tile").forEach((tile) => {
-    const checked = selected.has(tile.dataset.key);
-    tile.classList.toggle("selected", checked);
-    tile.querySelector(".photo-check").textContent = checked ? "✓" : "";
-    if (tile.getAttribute("role") === "checkbox")
-      tile.setAttribute("aria-checked", String(checked));
-  });
-}
-function selectAllVisible() {
-  const all = view.items.every((item) => selected.has(keyOf(item)));
-  if (all) selected.clear();
-  else view.items.forEach((item) => selected.add(keyOf(item)));
-  if (view.type === "album" && !view.candidates) {
-    selectMode = true;
-    const b = $("album-select");
-    if (b) b.textContent = "Done";
-    renderGrid();
-  } else syncSelectionTiles();
-  renderSelection();
-}
-function renderSelection() {
-  const items = selectionItems(),
-    bar = $("selection-bar");
-  bar.replaceChildren();
-  bar.classList.toggle("hidden", !items.length);
-  document.body.classList.toggle("has-selection", Boolean(items.length));
-  if (!items.length) return;
-  const summary = el("div", "selection-summary");
-  summary.append(
-    el("strong", "", plural(photoIds(items).size, "photo") + " selected"),
-    button("Clear", "", () => {
-      selected.clear();
-      syncSelectionTiles();
-      renderSelection();
-    }),
-  );
-  const actions = el("div", "selection-actions");
-  if (view.candidates) {
-    const pet = petById(view.petId);
-    actions.append(
-      button(`Add to ${pet.name}`, "primary", () => assignSelection(pet.id)),
-    );
-    pets
-      .filter((other) => other.id !== pet.id)
-      .forEach((other) =>
-        actions.append(button(other.name, "", () => assignSelection(other.id))),
-      );
-    actions.append(
-      button("Not my pets", "subtle", () => assignSelection(null, true)),
-    );
-  } else {
-    pets.forEach((pet, index) => {
-      const b = button(pet.name, "", () => assignSelection(pet.id));
-      b.title =
-        (items[0].type === "photo" ? "Move to " : "Name as ") +
-        pet.name +
-        " (" +
-        (index + 1) +
-        ")";
-      b.append(el("span", "selection-shortcut", String(index + 1)));
-      actions.append(b);
-    });
-    actions.append(
-      button(
-        items[0].type === "photo" ? "Remove name" : "Not my pets",
-        "subtle",
-        () => assignSelection(null, true),
-      ),
-    );
-  }
-  bar.append(summary, actions);
-  renderUndo();
-}
-function removeLocally(op) {
-  op.startedAt = performance.now();
-  boardGeneration++;
-  lastSelected = -1;
-  op.routeKey = view?.key;
-  op.positions = op.items.map((item) => ({
-    item,
-    index: view.items.findIndex((current) => keyOf(current) === keyOf(item)),
-  }));
-  op.items.forEach((item) => {
-    (item.type === "group" ? removedGroups : removedPhotos).add(item.id);
-    selected.delete(keyOf(item));
-  });
-  view.items = view.items.filter(
-    (item) => !op.items.some((removed) => keyOf(item) === keyOf(removed)),
-  );
-  view.offset = Math.max(0, view.offset - op.items.length);
-  renderGrid();
-  renderSelection();
-  op.uiMs = performance.now() - op.startedAt;
-}
-function restoreLocally(op, failedIds) {
-  if (!op) {
-    if (view && ["album", "unidentified"].includes(view.type)) reloadPhotos();
-    return;
-  }
-  lastSelected = -1;
-  const restore = op.positions.filter(
-    ({ item }) => !failedIds || photoFailed(item, failedIds),
-  );
-  restore.forEach(({ item }) =>
-    (item.type === "group" ? removedGroups : removedPhotos).delete(item.id),
-  );
-  if (view?.key !== op.routeKey) return;
-  restore.forEach(({ item, index }) => {
-    if (!view.items.some((current) => keyOf(current) === keyOf(item)))
-      view.items.splice(
-        Math.min(Math.max(0, index), view.items.length),
-        0,
-        item,
-      );
-  });
-  renderGrid();
-  renderSelection();
-}
-async function assignSelection(petId, skip = false) {
-  const items = selectionItems();
-  if (!items.length) return;
-  if (
-    items[0].type === "group" &&
-    items.reduce((count, item) => count + item.crop_count, 0) > 5000
-  ) {
-    toast("Choose up to 5,000 photos at a time. Your selection is still here.");
-    return;
-  }
-  const groups = items[0].type === "group",
-    name = petById(petId)?.name;
-  const body = groups
-    ? { group_ids: items.map((item) => item.id), pet_id: petId, skip }
-    : {
-        items: items.flatMap((item) =>
-          assignmentsFor(item).map((id) => ({
-            detection_id: id,
-            pet_id: petId,
-            status: skip ? "pending" : "confirmed",
-            expected_pet_id: item.pet_id,
-            expected_status: item.status,
-          })),
-        ),
-      };
-  const op = {
-    kind: groups ? "groups" : "photos",
-    path: groups ? "groups/batch" : "review/batch",
-    body,
-    items,
-    label: skip
-      ? groups
-        ? "Photos hidden"
-        : "Names removed"
-      : `Added to ${name}`,
-    petId,
-    skip,
-    count: photoIds(items).size,
-  };
-  op.body.operation_id = operationId();
-  removeLocally(op);
-  outbox.enqueue(op);
-}
-const outbox = new window.PetActionQueue({
-  send: async (op) => {
-    let result;
-    if (op.body.items && op.body.items.length > 100) {
-      const results = [];
-      for (let offset = 0; offset < op.body.items.length; offset += 100) {
-        try {
-          const part = await api(op.path, {
-            method: "POST",
-            body: JSON.stringify({
-              items: op.body.items.slice(offset, offset + 100),
-              operation_id:
-                (op.body.operation_id ||
-                  (op.body.operation_id = operationId())) +
-                "-" +
-                offset,
-            }),
-          });
-          results.push(...part.results);
-        } catch (error) {
-          error.failedIds = new Set([
-            ...results.filter((row) => !row.saved).map((row) => row.id),
-            ...op.body.items.slice(offset).map((item) => item.detection_id),
-          ]);
-          throw error;
+    def undo_info(self):
+        action = json.loads(self.store.state("last_group_action", "null"))
+        if (
+            not action
+            or (datetime.now(UTC) - datetime.fromisoformat(action["created_at"])).total_seconds()
+            > 3600
+        ):
+            return None
+        return {
+            "id": action["id"],
+            "count": len(action["rows"]),
+            "pet_id": action["pet_id"],
+            "skip": action["skip"],
         }
-      }
-      result = { results, failed: results.filter((row) => !row.saved).length };
-    } else
-      result = await api(op.path, {
-        method: "POST",
-        body: JSON.stringify(op.body),
-      });
-    if (result.failed) {
-      const error = new Error(
-        `${result.failed} photos could not be changed. Your other changes were saved.`,
-      );
-      error.failedIds = new Set(
-        result.results.filter((row) => !row.saved).map((row) => row.id),
-      );
-      throw error;
-    }
-    return result;
-  },
-  onChange: () => {
-    renderActivity();
-  },
-  onSuccess: (op, result) => {
-    if (op.startedAt)
-      console.info(
-        "Pet action saved " +
-          JSON.stringify({
-            uiMs: Math.round(op.uiMs || 0),
-            saveMs: Math.round(performance.now() - op.startedAt),
-            photos: result.photos ?? op.count,
-          }),
-      );
-    boardGeneration++;
-    op.items.forEach((item) =>
-      (item.type === "group" ? removedGroups : removedPhotos).delete(item.id),
-    );
-    if (op.kind === "photos") {
-      dismissedUndoId = status.undo_group?.id || dismissedUndoId;
-      sessionStorage.setItem("pet-dismissed-undo", dismissedUndoId);
-    }
-    if (op.kind === "undo") {
-      if (op.path.startsWith("groups/undo/")) {
-        dismissedUndoId = op.path.split("/").at(-1);
-        sessionStorage.setItem("pet-dismissed-undo", dismissedUndoId);
-      }
-      lastUndo = null;
-      status.undo_group = null;
-      restoreLocally(op.original);
-      toast("Change undone");
-    } else {
-      if (op.kind === "groups") {
-        if (result.undo_id)
-          lastUndo = {
-            kind: "group",
-            id: result.undo_id,
-            label: op.label,
-            original: op,
-          };
-      } else lastUndo = { kind: "photos", label: op.label, original: op };
-      toast(`${op.count ? plural(op.count, "photo") + " · " : ""}${op.label}`);
-    }
-    renderUndo();
-    refreshAlbums().catch(() => {});
-    // A new page can load immediately; no policy fit, status request, or full
-    // library refresh belongs to this action's completion path.
-    if (view?.key === op.routeKey && !view.items.length && !view.loading)
-      loadItems(false).catch(showError);
-  },
-  onError: (op, error) => {
-    boardGeneration++;
-    if (error.failedIds)
-      op.items
-        .filter((item) => !photoFailed(item, error.failedIds))
-        .forEach((item) =>
-          (item.type === "group" ? removedGroups : removedPhotos).delete(
-            item.id,
-          ),
-        );
-    if (op.kind !== "undo") {
-      restoreLocally(op, error.failedIds);
-      if (error.failedIds) {
-        op.items = op.items.filter((item) =>
-          photoFailed(item, error.failedIds),
-        );
-        op.positions = op.positions.filter(({ item }) =>
-          photoFailed(item, error.failedIds),
-        );
-        if (op.body.items)
-          op.body.items = op.body.items.filter((item) =>
-            error.failedIds.has(item.detection_id),
-          );
-        op.count = photoIds(op.items).size;
-        op.body.operation_id = operationId();
-      }
-    }
-    showError(error);
-    renderUndo();
-  },
-});
-function retryFailed(failure) {
-  const op = failure.op;
-  if (op.kind !== "undo") {
-    if (view?.key === op.routeKey) removeLocally(op);
-    else
-      op.items.forEach((item) =>
-        (item.type === "group" ? removedGroups : removedPhotos).add(item.id),
-      );
-  }
-  outbox.retry(failure.id);
-}
-function renderUndo() {
-  const bar = $("undo-bar"),
-    failed = outbox.failed.at(-1);
-  bar.classList.toggle("hidden", !lastUndo && !failed);
-  if (!lastUndo && !failed) return;
-  $("undo-label").textContent = failed
-    ? "A change wasn’t saved"
-    : lastUndo.label;
-  $("undo-action").textContent = failed ? "Retry" : "Undo";
-  $("undo-action").disabled = Boolean(outbox.pending);
-}
-$("undo-action").addEventListener("click", () => {
-  const failed = outbox.failed.at(-1);
-  if (failed) {
-    retryFailed(failed);
-    return;
-  }
-  if (!lastUndo || outbox.pending) return;
-  const original = lastUndo.original;
-  if (lastUndo.kind === "group")
-    outbox.enqueue({
-      kind: "undo",
-      path: "groups/undo/" + lastUndo.id,
-      body: { operation_id: operationId() },
-      original,
-      items: [],
-      label: "Undo",
-    });
-  else {
-    const body = {
-      items: original.items.flatMap((item) =>
-        assignmentsFor(item).map((id) => ({
-          detection_id: id,
-          pet_id: item.pet_id,
-          status: item.status,
-          expected_pet_id: original.petId || undefined,
-          expected_status: original.skip ? "pending" : "confirmed",
-        })),
-      ),
-    };
-    outbox.enqueue({
-      kind: "undo",
-      path: "review/batch",
-      body: { ...body, operation_id: operationId() },
-      original,
-      items: [],
-      label: "Undo",
-    });
-  }
-});
-$("dismiss-undo").addEventListener("click", () => {
-  if (outbox.failed.length) {
-    navigate("activity");
-    return;
-  }
-  dismissedUndoId = lastUndo?.id || status.undo_group?.id || "";
-  sessionStorage.setItem("pet-dismissed-undo", dismissedUndoId);
-  lastUndo = null;
-  status.undo_group = null;
-  renderUndo();
-});
-let viewerItems = [];
-function openViewer(items, index) {
-  viewerItems = items;
-  viewerIndex = index;
-  renderViewer();
-  if (!$("viewer").open) $("viewer").showModal();
-}
-function renderViewer() {
-  const row = viewerItems[viewerIndex];
-  if (!row) return;
-  $("viewer-name").textContent = row.name || "Photo";
-  const img = $("viewer-image");
-  const preview = cropCache.get(`photo:${row.id}:320`);
-  if (preview) img.src = preview;
-  else img.removeAttribute("src");
-  img.alt = row.name || "Pet photo";
-  scheduleCrop(img, row.id, 1280, "photo");
-  $("viewer-previous").disabled = viewerIndex === 0;
-  $("viewer-next").disabled = viewerIndex === viewerItems.length - 1;
-  const actions = $("viewer-actions");
-  actions.replaceChildren();
-  actions.append(
-    el(
-      "span",
-      "",
-      row.identities?.map((identity) => identity.name).join(" · ") ||
-        row.pet_name ||
-        "Unidentified",
-    ),
-  );
-  if (view?.type === "album" && !view.petId) {
-    (row.identities || []).forEach((identity) =>
-      actions.append(
-        button("Open " + identity.name, "", () => {
-          $("viewer").close();
-          navigate("pet/" + identity.pet_id);
-        }),
-      ),
-    );
-    return;
-  }
-  pets.forEach((pet) =>
-    actions.append(
-      button(pet.name, row.pet_id === pet.id ? "active" : "", () =>
-        changeViewerPhoto(row, pet.id),
-      ),
-    ),
-  );
-  if (row.status === "confirmed") {
-    actions.append(
-      button("Remove name", "quiet", () => changeViewerPhoto(row, null)),
-    );
-    actions.append(
-      button("Use as album cover", "quiet", async () => {
-        const pet = petById(row.pet_id),
-          previous = pet.cover_id;
-        pet.cover_id = row.id;
-        renderNavigation();
-        toast("Album cover updated");
-        try {
-          await api(`pets/${row.pet_id}/cover`, {
-            method: "PUT",
-            body: JSON.stringify({ detection_id: row.id }),
-          });
-        } catch (error) {
-          pet.cover_id = previous;
-          renderNavigation();
-          throw error;
+
+    def undo_group(self, action_id):
+        with self.model_lock:
+            info = self.undo_info()
+            if info is None or info["id"] != action_id:
+                raise ValueError(
+                    "This undo is no longer available. Correct tags in the pet collection."
+                )
+            action = json.loads(self.store.state("last_group_action"))
+            selected = json.dumps([row["detection_id"] for row in action["rows"]])
+            with self.store.connection() as conn:
+                current = {
+                    row["detection_id"]: dict(row)
+                    for row in conn.execute(
+                        "SELECT r.* FROM reviews r JOIN detections d ON d.id=r.detection_id "
+                        "JOIN assets a ON a.id=d.asset_id WHERE d.id IN "
+                        "(SELECT value FROM json_each(?)) AND r.model=? "
+                        "AND d.detector=? AND d.revision=a.revision",
+                        (selected, self.settings.recognizer_key, self.settings.detector_key),
+                    )
+                }
+                references = {}
+                for ref in conn.execute(
+                    "SELECT * FROM reference_images WHERE detection_id IN "
+                    "(SELECT value FROM json_each(?)) ORDER BY pet_id,kind",
+                    (selected,),
+                ):
+                    references.setdefault(ref["detection_id"], []).append(
+                        {"pet_id": ref["pet_id"], "kind": ref["kind"]}
+                    )
+                for old in action["rows"]:
+                    row = current.get(old["detection_id"])
+                    if (
+                        not row
+                        or row["status"] != ("rejected" if action["skip"] else "confirmed")
+                        or row["pet_id"] != (None if action["skip"] else action["pet_id"])
+                        or references.get(old["detection_id"], []) != old["after_references"]
+                    ):
+                        raise ValueError(
+                            "A photo in this group changed. Correct it in the pet collection."
+                        )
+                # Only automatic assignments still owned by this teaching pass
+                # are reverted. A later explicit name has removed that marker.
+                propagated = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT r.*,d.asset_id FROM reviews r JOIN detections d "
+                        "ON d.id=r.detection_id "
+                        "JOIN assets a ON a.id=d.asset_id JOIN automatic_sources src "
+                        "ON src.detection_id=r.detection_id AND src.model=r.model "
+                        "JOIN automatic_reviews ar ON ar.detection_id=r.detection_id "
+                        "AND ar.model=r.model "
+                        "WHERE src.revision=? AND r.model=? AND r.status='confirmed' "
+                        "AND d.detector=? AND d.revision=a.revision",
+                        (
+                            action["revision"],
+                            self.settings.recognizer_key,
+                            self.settings.detector_key,
+                        ),
+                    )
+                ]
+                tags = {row["id"]: row["tag"] for row in conn.execute("SELECT id,tag FROM pets")}
+                for old in [*action["rows"], *propagated]:
+                    row = current[old["detection_id"]] if "references" in old else old
+                    if row["status"] == "confirmed" and row["pet_id"] and not self.settings.demo:
+                        # Required even for unpublished rows: an HTTP tag write
+                        # may be in flight while the user presses Undo.
+                        conn.execute(
+                            "INSERT OR IGNORE INTO tag_removals VALUES (?,?,?,?)",
+                            (
+                                old["detection_id"],
+                                self.settings.recognizer_key,
+                                old["asset_id"],
+                                tags[row["pet_id"]],
+                            ),
+                        )
+                    conn.execute(
+                        "DELETE FROM automatic_reviews WHERE detection_id=? AND model=?",
+                        (old["detection_id"], self.settings.recognizer_key),
+                    )
+                    conn.execute(
+                        "DELETE FROM automatic_sources WHERE detection_id=? AND model=?",
+                        (old["detection_id"], self.settings.recognizer_key),
+                    )
+                    conn.execute(
+                        "UPDATE reviews SET pet_id=?,status='pending',published=0,error=NULL,"
+                        "score=?,margin=? "
+                        "WHERE detection_id=? AND model=?",
+                        (
+                            old.get("pet_id") if "references" in old else None,
+                            old["score"],
+                            old["margin"],
+                            old["detection_id"],
+                            self.settings.recognizer_key,
+                        ),
+                    )
+                    if "references" in old:
+                        conn.execute(
+                            "UPDATE detections SET species=? WHERE id=?",
+                            (old["species"], old["detection_id"]),
+                        )
+                        conn.execute(
+                            "DELETE FROM reference_images WHERE detection_id=?",
+                            (old["detection_id"],),
+                        )
+                        conn.executemany(
+                            "INSERT INTO reference_images VALUES (?,?,?)",
+                            [
+                                (ref["pet_id"], old["detection_id"], ref["kind"])
+                                for ref in old["references"]
+                            ],
+                        )
+                    elif row["pet_id"]:
+                        conn.execute(
+                            "DELETE FROM reference_images WHERE pet_id=? AND detection_id=? "
+                            "AND kind='positive'",
+                            (row["pet_id"], old["detection_id"]),
+                        )
+                self._review_changed(conn)
+                conn.execute("INSERT OR REPLACE INTO state VALUES ('last_group_action','null')")
+            self.gallery_changed()
+            return {"restored": len(action["rows"]), "automatic_restored": len(propagated)}
+
+    def publish_one(self):
+        # Only the publisher is serialized across network calls. Human naming
+        # remains available even when Immich is taking its full HTTP timeout.
+        with self.publish_lock:
+            return self._publish_one() or self._remove_one()
+
+    def _apply_tag_removals(self, row, asset):
+        for removal in self.store.rows(
+            "SELECT tag FROM tag_removals WHERE detection_id=? AND model=?",
+            (row["detection_id"], row["model"]),
+        ):
+            # Other animals in the same photo can still legitimately need this tag.
+            needed = self.store.one(
+                "SELECT 1 FROM reviews r JOIN detections d ON d.id=r.detection_id "
+                "JOIN pets p ON p.id=r.pet_id WHERE d.asset_id=? AND d.revision=? "
+                "AND d.detector=? AND r.model=? AND r.status='confirmed' AND p.tag=?",
+                (
+                    row["asset_id"],
+                    row["revision"],
+                    self.settings.detector_key,
+                    row["model"],
+                    removal["tag"],
+                ),
+            )
+            if not needed:
+                self.immich.untag(row["asset_id"], removal["tag"], asset)
+
+    def _finish_tag_change(self, row, published):
+        with self.model_lock:
+            if not self._current_tag_operation(row):
+                # A newer decision already queued the compensating removal or
+                # publication. Do not clear its debt or mark it published.
+                return
+            with self.store.connection() as conn:
+                conn.execute(
+                    "DELETE FROM tag_removals WHERE detection_id=? AND model=?",
+                    (row["detection_id"], row["model"]),
+                )
+                conn.execute(
+                    "UPDATE reviews SET published=?,error=NULL WHERE detection_id=? AND model=?",
+                    (published, row["detection_id"], row["model"]),
+                )
+                self._review_changed(conn)
+
+    def _current_tag_operation(self, row):
+        current = self.store.one(
+            "SELECT r.pet_id,r.status,r.published,d.revision FROM reviews r "
+            "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+            "WHERE r.detection_id=? AND r.model=? AND d.detector=? AND d.revision=a.revision",
+            (row["detection_id"], row["model"], self.settings.detector_key),
+        )
+        return current and all(
+            current[key] == row[key] for key in ("pet_id", "status", "published", "revision")
+        )
+
+    def _tag_change_failed(self, row, error):
+        with self.model_lock:
+            if self._current_tag_operation(row):
+                self.store.execute(
+                    "UPDATE reviews SET error=? WHERE detection_id=? AND model=?",
+                    (self.safe_error(error), row["detection_id"], row["model"]),
+                )
+
+    def _remove_one(self):
+        if self.settings.demo:
+            return False
+        row = self.store.one(
+            "SELECT r.*,d.asset_id,d.revision FROM reviews r "
+            "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+            "WHERE r.status<>'confirmed' AND r.error IS NULL AND r.model=? "
+            "AND d.detector=? AND d.revision=a.revision "
+            "AND EXISTS(SELECT 1 FROM tag_removals t WHERE t.detection_id=r.detection_id "
+            "AND t.model=r.model) LIMIT 1",
+            (self.settings.recognizer_key, self.settings.detector_key),
+        )
+        if row is None:
+            return False
+        try:
+            asset = self.immich.asset(row["asset_id"])
+            if not eligible(asset) or asset_revision(asset) != row["revision"]:
+                raise ValueError("Asset changed or is unavailable; resync before removing tags")
+            if self.stop_event.is_set():
+                return False
+            self._apply_tag_removals(row, asset)
+            self._finish_tag_change(row, 0)
+        except Exception as error:
+            self._tag_change_failed(row, error)
+        return True
+
+    def _publish_one(self):
+        row = self.store.one(
+            "SELECT r.*,d.asset_id,d.revision,p.tag FROM reviews r "
+            "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+            "JOIN pets p ON p.id=r.pet_id WHERE r.status='confirmed' AND r.published=0 "
+            "AND r.error IS NULL AND r.model=? AND d.detector=? AND d.revision=a.revision LIMIT 1",
+            (self.settings.recognizer_key, self.settings.detector_key),
+        )
+        if row is None or self.settings.demo:
+            return False
+        with self.model_lock:
+            if not self._current_tag_operation(row):
+                return True
+            self.active_publication = row
+        try:
+            asset = self.immich.asset(row["asset_id"])
+            if not eligible(asset) or asset_revision(asset) != row["revision"]:
+                raise ValueError("Asset changed or is unavailable; resync before publishing")
+            if self.stop_event.is_set():
+                return False
+            with self.model_lock:
+                if not self._current_tag_operation(row):
+                    return True
+            self.immich.tag(row["asset_id"], row["tag"])
+            self._apply_tag_removals(row, asset)
+            self._finish_tag_change(row, 1)
+        except Exception as error:
+            self._tag_change_failed(row, error)
+        finally:
+            with self.model_lock:
+                self.active_publication = None
+        return True
+
+    def retry_failed(self):
+        self.store.execute(
+            "UPDATE jobs SET status='queued',attempts=0,available_at=0,error=NULL "
+            "WHERE status='failed' AND pipeline=?",
+            (self.settings.pipeline_key,),
+        )
+        self.store.execute("UPDATE reviews SET error=NULL WHERE published=0")
+        if self.recheck_status()["state"] == "failed":
+            self.gallery_changed()
+        self.wake_event.set()
+
+    def review_summary(self):
+        """Count photos separately from crops, using the review page's tag semantics."""
+        published = "status='confirmed'" if self.settings.demo else "published=1"
+        current = (
+            "WITH current AS MATERIALIZED (SELECT d.asset_id,r.* FROM detections d "
+            "JOIN assets a ON a.id=d.asset_id JOIN reviews r ON r.detection_id=d.id "
+            "WHERE d.revision=a.revision AND d.detector=? AND r.model=?),"
+            f"tagged AS MATERIALIZED (SELECT DISTINCT asset_id FROM current WHERE {published} "
+            "AND pet_id IS NOT NULL UNION SELECT tr.asset_id FROM tag_removals tr "
+            "JOIN pets p ON p.tag=tr.tag) "
+        )
+        params = (self.settings.detector_key, self.settings.recognizer_key)
+        summary = self.store.one(
+            current + "SELECT coalesce(sum(NOT has_tag AND active>0),0) untagged_photos,"
+            "coalesce(sum(CASE WHEN NOT has_tag THEN active ELSE 0 END),0) untagged_crops,"
+            "coalesce(sum(completed>0),0) tagged_photos,"
+            "coalesce(sum(completed),0) tagged_crops,"
+            "coalesce(sum(has_tag AND pending>0),0) partially_tagged_photos,"
+            "coalesce(sum(CASE WHEN has_tag THEN pending ELSE 0 END),0) extra_pending_crops,"
+            "coalesce(sum(changes),0) pending_tag_changes FROM ("
+            "SELECT c.asset_id,sum(c.status<>'rejected') active,"
+            "sum(c.status='pending') pending,"
+            f"sum(c.status='confirmed' AND ({published})) completed,"
+            "EXISTS(SELECT 1 FROM tagged t WHERE t.asset_id=c.asset_id) has_tag,"
+            "sum((c.status='confirmed' AND c.published=0 AND ?=0) OR EXISTS("
+            "SELECT 1 FROM tag_removals tr WHERE tr.detection_id=c.detection_id "
+            "AND tr.model=c.model)) changes FROM current c GROUP BY c.asset_id)",
+            (*params, int(self.settings.demo)),
+        )
+        # Each pending crop has one first unmet check, so these categories never
+        # double-count. Cached results are explicitly provisional during a recheck.
+        summary["reasons"] = {
+            row["reason"]: row["count"]
+            for row in self.store.rows(
+                current + "SELECT CASE WHEN c.pet_id IS NULL THEN 'no_candidate' "
+                "WHEN coalesce(refs.count,0)<json_extract(rule.value,'$.min_references') "
+                "THEN 'needs_examples' "
+                "WHEN c.score<json_extract(rule.value,'$.threshold') THEN 'below_similarity' "
+                "WHEN c.margin<json_extract(rule.value,'$.margin') THEN 'ambiguous' "
+                "WHEN coalesce(pa.enabled,?)=0 THEN 'automation_paused' "
+                "ELSE 'ready' END reason,count(*) count FROM current c "
+                "LEFT JOIN (SELECT pet_id,count(*) count FROM reference_images "
+                "WHERE kind='positive' GROUP BY pet_id) refs ON refs.pet_id=c.pet_id "
+                "LEFT JOIN pet_automation pa ON pa.pet_id=c.pet_id "
+                "LEFT JOIN json_each(?) rule ON rule.key=c.pet_id "
+                "WHERE c.status='pending' AND NOT EXISTS("
+                "SELECT 1 FROM tagged t WHERE t.asset_id=c.asset_id) GROUP BY reason",
+                (
+                    *params,
+                    int(self.settings.auto_tag),
+                    json.dumps(self.policies()),
+                ),
+            )
         }
-      }),
-    );
-  }
-}
-function changeViewerPhoto(row, petId) {
-  const op = {
-    kind: "photos",
-    path: "review/batch",
-    body: {
-      items: assignmentsFor(row).map((id) => ({
-        detection_id: id,
-        pet_id: petId,
-        status: petId ? "confirmed" : "pending",
-        expected_pet_id: row.pet_id,
-        expected_status: row.status,
-      })),
-    },
-    items: [{ ...row, type: "photo" }],
-    positions: [
-      {
-        item: { ...row, type: "photo" },
-        index: view?.items.findIndex((item) => item.id === row.id) ?? 0,
-      },
-    ],
-    routeKey: view?.key,
-    label: petId ? "Moved to " + petById(petId).name : "Name removed",
-    skip: !petId,
-    petId,
-    count: 1,
-  };
-  if (view?.items.some((item) => item.id === row.id)) removeLocally(op);
-  op.body.operation_id = operationId();
-  $("viewer").close();
-  outbox.enqueue(op);
-}
-$("viewer-close").addEventListener("click", () => $("viewer").close());
-$("viewer-previous").addEventListener("click", () => {
-  if (viewerIndex > 0) {
-    viewerIndex--;
-    renderViewer();
-  }
-});
-$("viewer-next").addEventListener("click", () => {
-  if (viewerIndex < viewerItems.length - 1) {
-    viewerIndex++;
-    renderViewer();
-  }
-});
-async function openDetail(group) {
-  const data = await api("groups/" + group.id);
-  detailGroup = { ...data, type: "group" };
-  detailSelected = new Set(data.members.map((row) => row.id));
-  $("detail-title").textContent = plural(data.photo_count, "similar photo");
-  $("detail-grid").replaceChildren();
-  data.members.forEach((row) => {
-    const tile = button(
-      "",
-      "photo-tile selected",
-      () => {
-        if (detailSelected.has(row.id)) detailSelected.delete(row.id);
-        else detailSelected.add(row.id);
-        renderDetailSelection();
-      },
-      `Include ${row.name}`,
-    );
-    tile.dataset.id = row.id;
-    tile.setAttribute("role", "checkbox");
-    tile.setAttribute("aria-checked", "true");
-    tile.append(image(row.id, row.name), el("span", "photo-check", "✓"));
-    $("detail-grid").append(tile);
-  });
-  $("detail-grid").classList.add("selecting");
-  renderDetailSelection();
-  $("group-detail").showModal();
-}
-function renderDetailSelection() {
-  $("detail-count").textContent =
-    plural(
-      new Set(
-        detailGroup.members
-          .filter((row) => detailSelected.has(row.id))
-          .map((row) => row.asset_id),
-      ).size,
-      "photo",
-    ) + " selected";
-  $("detail-toggle").textContent =
-    detailSelected.size === detailGroup.members.length
-      ? "Clear selection"
-      : "Select all";
-  $("detail-grid")
-    .querySelectorAll(".photo-tile")
-    .forEach((tile) => {
-      const checked = detailSelected.has(tile.dataset.id);
-      tile.classList.toggle("selected", checked);
-      tile.setAttribute("aria-checked", String(checked));
-      tile.querySelector(".photo-check").textContent = checked ? "✓" : "";
-    });
-  const actions = $("detail-actions");
-  actions.replaceChildren();
-  pets.forEach((pet) => {
-    const b = button(
-      "Add to " + pet.name,
-      pet.id === view?.petId ? "primary" : "",
-      () => submitDetail(pet.id),
-    );
-    b.disabled = !detailSelected.size;
-    actions.append(b);
-  });
-}
-function submitDetail(petId) {
-  const group = detailGroup,
-    excluded = group.members
-      .filter((row) => !detailSelected.has(row.id))
-      .map((row) => row.id);
-  const item = view.items.find((row) => row.id === group.id) || group;
-  const op = {
-    kind: "groups",
-    path: "groups/" + group.id + "/decision",
-    body: { pet_id: petId, excluded, skip: false },
-    items: [item],
-    label: "Added to " + petById(petId).name,
-    petId,
-    count: new Set(
-      group.members
-        .filter((row) => detailSelected.has(row.id))
-        .map((row) => row.asset_id),
-    ).size,
-  };
-  removeLocally(op);
-  op.body.operation_id = operationId();
-  $("group-detail").close();
-  outbox.enqueue(op);
-}
-$("detail-close").addEventListener("click", () => $("group-detail").close());
-$("detail-toggle").addEventListener("click", () => {
-  detailSelected =
-    detailSelected.size === detailGroup.members.length
-      ? new Set()
-      : new Set(detailGroup.members.map((row) => row.id));
-  renderDetailSelection();
-});
-function renderSettings() {
-  $("view").replaceChildren();
-  heading("Settings");
-  const container = el("div", "settings-container");
-  $("view").append(container);
-  const sorting = el("section", "settings-section");
-  sorting.append(el("h2", "", "Automatic sorting"));
-  const row = el("div", "setting-row"),
-    copy = el("div");
-  copy.append(
-    el("strong", "", "Sorting preference"),
-    el("p", "", "Choose the balance between coverage and mistakes."),
-  );
-  const profile = el("select");
-  profile.setAttribute("aria-label", "Sorting preference");
-  [
-    ["careful", "Fewer mistakes"],
-    ["balanced", "Balanced"],
-    ["broader", "Sort more"],
-  ].forEach(([value, text]) => {
-    const o = el("option", "", text);
-    o.value = value;
-    profile.append(o);
-  });
-  profile.value = status.matching?.profile || "balanced";
-  profile.addEventListener("change", async () => {
-    const value = profile.value;
-    profile.disabled = true;
-    try {
-      await api("matching", {
-        method: "PUT",
-        body: JSON.stringify({ mode: "adaptive", profile: value }),
-      });
-      toast("Sorting preference saved");
-    } catch (error) {
-      showError(error);
-    } finally {
-      profile.disabled = false;
-      refreshStatus().catch(() => {});
-    }
-  });
-  row.append(copy, profile);
-  sorting.append(row);
-  pets.forEach((pet) => {
-    const r = el("div", "setting-row"),
-      label = el("div");
-    label.append(
-      image(pet.cover_id, "", "nav-avatar", 160),
-      el("strong", "", pet.name),
-    );
-    const toggle = button("", "switch", async () => {
-      const enabled = toggle.getAttribute("aria-checked") !== "true";
-      toggle.setAttribute("aria-checked", String(enabled));
-      try {
-        await api("pets/" + pet.id + "/automation", {
-          method: "PUT",
-          body: JSON.stringify({ enabled }),
-        });
-        pet.auto_tag = enabled;
-      } catch (error) {
-        toggle.setAttribute("aria-checked", String(!enabled));
-        showError(error);
-      }
-    });
-    toggle.setAttribute("role", "switch");
-    toggle.setAttribute("aria-label", "Automatic sorting for " + pet.name);
-    toggle.setAttribute("aria-checked", String(pet.auto_tag));
-    r.append(label, toggle);
-    sorting.append(r);
-  });
-  container.append(sorting);
-  const add = el("section", "settings-section");
-  add.append(el("h2", "", "Add a pet"));
-  const form = el("form", "settings-form"),
-    label = el("label", "", "Name"),
-    name = el("input");
-  name.required = true;
-  name.maxLength = 64;
-  name.placeholder = "Pet’s name";
-  name.autocomplete = "off";
-  label.append(name);
-  const speciesLabel = el("label", "", "Species"),
-    species = el("select");
-  [
-    ["dog", "Dog"],
-    ["cat", "Cat"],
-  ].forEach(([value, text]) => {
-    const o = el("option", "", text);
-    o.value = value;
-    species.append(o);
-  });
-  speciesLabel.append(species);
-  const submit = el("button", "primary", "Add pet");
-  submit.type = "submit";
-  form.append(label, speciesLabel, submit);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    submit.disabled = true;
-    try {
-      await api("pets", {
-        method: "POST",
-        body: JSON.stringify({ name: name.value, species: species.value }),
-      });
-      await refreshStatus();
-      toast("Pet added");
-      renderSettings();
-    } catch (error) {
-      showError(error);
-    } finally {
-      submit.disabled = false;
-    }
-  });
-  add.append(form);
-  container.append(add);
-  const activity = el("section", "settings-section");
-  activity.append(
-    el("h2", "", "Library"),
-    link("Background activity →", "#activity", "text-button"),
-  );
-  const note = el(
-    "p",
-    "settings-note",
-    "New photos are checked automatically. Naming and correcting photos helps future sorting.",
-  );
-  activity.append(note);
-  container.append(activity);
-  const connection = el("section", "settings-section");
-  connection.append(el("h2", "", "Connection"));
-  const dl = el("dl", "connection-grid");
-  [
-    [
-      "Immich",
-      status.immich_connected
-        ? "Connected"
-        : status.demo
-          ? "Demo mode"
-          : "Not connected",
-    ],
-    ["Recognition", status.provider || "—"],
-    ["Detection model", status.detector || "—"],
-    ["Identity model", status.recognizer || "—"],
-  ].forEach(([key, value]) =>
-    dl.append(el("dt", "", key), el("dd", "", value)),
-  );
-  connection.append(dl);
-  if (status.auth_required)
-    connection.append(
-      button("Forget service token", "text-button", () => {
-        token = "";
-        sessionStorage.removeItem("pet-service-token");
-        refreshStatus().catch(showError);
-      }),
-    );
-  container.append(connection);
-}
-function renderActivityPage() {
-  if (view?.type !== "activity") return;
-  $("view").replaceChildren();
-  heading(
-    "Background activity",
-    "You can keep browsing and naming photos while this runs.",
-  );
-  const container = el("div", "settings-container");
-  $("view").append(container);
-  const check = status.recheck || {},
-    section = el("section", "settings-section"),
-    line = el("div", "activity-detail");
-  const active = ["queued", "preparing", "running"].includes(check.state);
-  line.append(
-    el(
-      "strong",
-      "",
-      active
-        ? "Organizing your library"
-        : check.state === "failed"
-          ? "Sorting needs attention"
-          : "Library up to date",
-    ),
-    el("span", "", active && check.percent != null ? check.percent + "%" : ""),
-  );
-  section.append(line);
-  if (active) {
-    const progress = el("progress", "activity-progress");
-    progress.max = 100;
-    if (check.percent != null) progress.value = check.percent;
-    section.append(progress);
-  }
-  section.append(
-    el(
-      "p",
-      "settings-note",
-      active
-        ? `${number(check.completed)} of ${number(check.total)} checked.`
-        : check.state === "failed"
-          ? check.error
-          : "Clear matches are added automatically. There is nothing you need to wait for here.",
-    ),
-  );
-  if (status.review_summary?.pending_tag_changes)
-    section.append(
-      el(
-        "p",
-        "settings-note",
-        plural(status.review_summary.pending_tag_changes, "tag change") +
-          " syncing to Immich.",
-      ),
-    );
-  if (outbox.pending)
-    section.append(
-      el("p", "settings-note", plural(outbox.pending, "change") + " saving…"),
-    );
-  outbox.failed.forEach((failure) => {
-    const r = el("div", "setting-row");
-    r.append(
-      el("p", "error-text", failure.error.message),
-      button("Retry", "secondary", () => retryFailed(failure)),
-      button("Dismiss", "text-button", () => {
-        outbox.discard(failure.id);
-        renderActivityPage();
-      }),
-    );
-    section.append(r);
-  });
-  const controls = el("div", "heading-actions");
-  controls.style.marginTop = "20px";
-  [
-    ["Check for new photos", "sync"],
-    ["Scan existing library", "sync?full=true"],
-    ["Recheck names", "rematch"],
-    ["Retry failures", "retry"],
-  ].forEach(([text, path]) =>
-    controls.append(
-      button(text, "secondary small-button", async () => {
-        await api(path, { method: "POST" });
-        toast("Background work queued");
-        refreshStatus().catch(() => {});
-      }),
-    ),
-  );
-  controls.style.flexWrap = "wrap";
-  section.append(controls);
-  container.append(section);
-  const jobsSection = el("section", "settings-section");
-  jobsSection.append(el("h2", "", "Recent processing"));
-  const list = el("div", "job-list");
-  jobsSection.append(list);
-  container.append(jobsSection);
-  const version = routeVersion;
-  api("jobs")
-    .then((jobs) => {
-      if (version !== routeVersion || view.type !== "activity") return;
-      jobs.forEach((job) => {
-        const row = el("div", "job-row"),
-          name = el("div", "", job.name);
-        if (job.error) name.append(el("small", "", job.error));
-        row.append(name, el("span", "job-state " + job.status, job.status));
-        list.append(row);
-      });
-    })
-    .catch(() => {});
-}
-$("activity-indicator").addEventListener("click", () => navigate("activity"));
-$("login-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  token = $("service-token").value;
-  try {
-    await refreshStatus();
-    sessionStorage.setItem("pet-service-token", token);
-    $("service-token").value = "";
-    $("login-dialog").close();
-    await openRoute();
-  } catch (error) {
-    $("login-error").textContent = error.message;
-  }
-});
-$("login-dialog").addEventListener("cancel", (event) => event.preventDefault());
-window.addEventListener("hashchange", () => openRoute().catch(showError));
-window.addEventListener("beforeunload", (event) => {
-  if (outbox.pending) {
-    event.preventDefault();
-    event.returnValue = "";
-  }
-});
-document.addEventListener("keydown", (event) => {
-  if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName))
-    return;
-  if ($("viewer").open) {
-    if (event.key === "ArrowLeft") $("viewer-previous").click();
-    if (event.key === "ArrowRight") $("viewer-next").click();
-    return;
-  }
-  if ($("group-detail").open || $("login-dialog").open) return;
-  if (event.key === "Escape") {
-    selected.clear();
-    syncSelectionTiles();
-    renderSelection();
-  }
-  if (/^[1-9]$/.test(event.key) && selected.size) {
-    const pet = pets[Number(event.key) - 1];
-    if (pet) {
-      event.preventDefault();
-      assignSelection(pet.id);
-    }
-  }
-});
-(async () => {
-  try {
-    pets = await api("collections");
-    renderNavigation();
-    await openRoute();
-    refreshStatus().catch(() => {});
-  } catch (error) {
-    if (!$("login-dialog").open) showError(error);
-  }
-})();
-setInterval(() => {
-  if (!document.hidden && !$("login-dialog").open)
-    refreshStatus().catch(() => {});
-}, 5000);
+        return summary
+
+    def status(self):
+        jobs = {
+            r["status"]: r["count"]
+            for r in self.store.rows(
+                "SELECT status,count(*) count FROM jobs WHERE pipeline=? GROUP BY status",
+                (self.settings.pipeline_key,),
+            )
+        }
+        return {
+            "demo": self.settings.demo,
+            "auth_required": self.settings.auth_required and not self.settings.demo,
+            "auto_tag": any(pet["auto_tag"] for pet in self.pets()),
+            "provider": self.settings.provider,
+            "detector": self.settings.detector_repo,
+            "recognizer": self.settings.recognizer_repo,
+            "jobs": jobs,
+            "last_sync": self.store.state("last_sync"),
+            "last_error": self.store.state("last_error", ""),
+            "immich_connected": bool(self.store.state("last_sync"))
+            and not self.store.state("last_error")
+            and not self.settings.demo,
+            "min_references": self.settings.min_references,
+            "match_threshold": self.settings.match_threshold,
+            "match_margin": self.settings.match_margin,
+            "matching": self.matching_options(),
+            "undo_group": self.undo_info(),
+            "suggestions_updating": self.suggestions_pending(),
+            "recheck": self.recheck_status(),
+            "review_summary": self.review_summary(),
+            "pending_tag_removals": self.store.one("SELECT count(*) total FROM tag_removals")[
+                "total"
+            ],
+            "reviews": {
+                r["status"]: r["count"]
+                for r in self.store.rows(
+                    "SELECT r.status,count(*) count FROM reviews r JOIN detections d "
+                    "ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+                    "WHERE r.model=? AND d.detector=? AND d.revision=a.revision GROUP BY r.status",
+                    (self.settings.recognizer_key, self.settings.detector_key),
+                )
+            },
+        }
