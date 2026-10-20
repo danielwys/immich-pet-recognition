@@ -440,12 +440,24 @@ main {
   color: white;
   width: 30px;
   height: 30px;
+  padding: 0;
+  line-height: 1;
   border-radius: 50%;
   display: grid;
   place-items: center;
   opacity: 0;
   z-index: 4;
-  font-size: 19px;
+}
+.tile-zoom svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
 }
 .photo-tile:hover .tile-zoom,
 .selecting .tile-zoom {
@@ -1234,18 +1246,18 @@ main {
     inset: 20% 0 0;
   }
   .photo-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 4px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
   }
   .photo-tile,
   .photo-tile.selected:after {
     border-radius: 3px;
   }
   .photo-strip {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 4px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
   }
-  .photo-strip .photo-tile:nth-child(n + 6) {
+  .photo-strip .photo-tile:nth-child(n + 4) {
     display: none;
   }
   .section-title {
@@ -1285,7 +1297,7 @@ main {
     flex-wrap: wrap;
   }
   .view-toolbar p {
-    font-size: 12px;
+    font-size: 14px;
     max-width: 270px;
   }
   .toolbar-actions {
@@ -1293,12 +1305,12 @@ main {
     gap: 3px;
   }
   .toolbar-actions button {
-    font-size: 11px;
-    padding: 6px;
+    font-size: 13px;
+    padding: 9px;
   }
   .filter-chip {
-    padding: 7px 10px;
-    font-size: 11px;
+    padding: 9px 12px;
+    font-size: 13px;
   }
   .selection-bar {
     left: 10px;
@@ -1346,21 +1358,33 @@ main {
     text-align: center;
   }
   .photo-check {
-    width: 20px;
-    height: 20px;
-    top: 6px;
-    left: 6px;
-    font-size: 12px;
+    width: 24px;
+    height: 24px;
+    top: 10px;
+    left: 10px;
+    font-size: 14px;
   }
   .tile-zoom {
     top: 4px;
     right: 4px;
-    width: 25px;
-    height: 25px;
-    font-size: 16px;
+    width: 44px;
+    height: 44px;
+    background: none;
+  }
+  .tile-zoom:before {
+    content: "";
+    position: absolute;
+    inset: 4px;
+    border-radius: 50%;
+    background: #1119;
+    z-index: -1;
+  }
+  .tile-zoom svg {
+    width: 20px;
+    height: 20px;
   }
   .tile-count {
-    font-size: 10px;
+    font-size: 12px;
     bottom: 6px;
     right: 6px;
   }
@@ -1422,8 +1446,8 @@ main {
   }
   .detail-grid {
     padding: 0 10px 20px;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 4px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
   }
   .detail-actions {
     padding: 12px 15px max(18px, env(safe-area-inset-bottom));

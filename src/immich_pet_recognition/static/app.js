@@ -741,15 +741,25 @@ function photoTile(item, index) {
       tile.append(el("span", "tile-count", "▣ " + number(item.photo_count)));
   } else tile.append(photoImage(item));
   tile.append(el("span", "photo-check", selected.has(key) ? "✓" : ""));
-  if (group)
-    tile.append(
-      button(
-        "⤢",
-        "tile-zoom",
-        () => openDetail(item),
-        `Inspect ${plural(item.photo_count, "similar photo")}`,
-      ),
+  if (group) {
+    const expand = button(
+      "",
+      "tile-zoom",
+      () => openDetail(item),
+      `Inspect ${plural(item.photo_count, "similar photo")}`,
     );
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("aria-hidden", "true");
+    const arrows = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "path",
+    );
+    arrows.setAttribute("d", "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7");
+    icon.append(arrows);
+    expand.append(icon);
+    tile.append(expand);
+  }
   return tile;
 }
 function toggleItem(item, index, range = false) {
