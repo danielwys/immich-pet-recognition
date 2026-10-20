@@ -335,6 +335,15 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
         except sqlite3.IntegrityError:
             raise HTTPException(409, "A pet with this name already exists") from None
 
+    @app.put("/api/pets/{pet_id}", dependencies=auth)
+    def update_pet(pet_id: UUID, body: PetCreate):
+        try:
+            return service.update_pet(str(pet_id), body.name, body.species)
+        except ValueError as error:
+            raise HTTPException(404, str(error)) from None
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "A pet with this name already exists") from None
+
     @app.post("/api/pets/{pet_id}/references", dependencies=auth, status_code=201)
     def add_reference(pet_id: UUID, body: ReferenceCreate):
         try:

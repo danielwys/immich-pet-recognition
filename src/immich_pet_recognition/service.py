@@ -770,6 +770,88 @@ class Service:
             )
             self.gallery_changed()
 
+    def update_pet(self, pet_id, name, species):
+        with self.model_lock:
+            old = self.store.one("SELECT * FROM pets WHERE id=?", (pet_id,))
+            if old is None:
+                raise ValueError("Pet not found")
+            pet = {"id": pet_id, "name": name, "species": species, "tag": f"Pets/{name}"}
+            if pet == old:
+                return pet
+            with self.store.connection() as conn:
+                # Check uniqueness before changing photos or queuing tag work.
+                conn.execute(
+                    "UPDATE pets SET name=:name,species=:species,tag=:tag WHERE id=:id", pet
+                )
+                if old["tag"] != pet["tag"]:
+                    if not self.settings.demo:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO tag_removals "
+                            "SELECT r.detection_id,r.model,d.asset_id,? FROM reviews r "
+                            "JOIN detections d ON d.id=r.detection_id "
+                            "JOIN assets a ON a.id=d.asset_id WHERE r.pet_id=? "
+                            "AND r.status='confirmed' AND r.model=? AND d.detector=? "
+                            "AND d.revision=a.revision",
+                            (
+                                old["tag"],
+                                pet_id,
+                                self.settings.recognizer_key,
+                                self.settings.detector_key,
+                            ),
+                        )
+                    conn.execute(
+                        "UPDATE reviews SET published=0,error=NULL WHERE pet_id=? "
+                        "AND status='confirmed' AND model=? AND detection_id IN "
+                        "(SELECT d.id FROM detections d JOIN assets a ON a.id=d.asset_id "
+                        "WHERE d.detector=? AND d.revision=a.revision)",
+                        (pet_id, self.settings.recognizer_key, self.settings.detector_key),
+                    )
+                if old["species"] != species:
+                    corrected = json.dumps(
+                        [
+                            row[0]
+                            for row in conn.execute(
+                                "SELECT detection_id FROM reference_images "
+                                "WHERE pet_id=? AND kind='positive' UNION "
+                                "SELECT detection_id FROM reviews WHERE pet_id=? "
+                                "AND status='confirmed' AND model=?",
+                                (pet_id, pet_id, self.settings.recognizer_key),
+                            )
+                        ]
+                    )
+                    conn.execute(
+                        "UPDATE detections SET species=? WHERE id IN "
+                        "(SELECT value FROM json_each(?))",
+                        (species, corrected),
+                    )
+                    # Keep feedback consistent with the corrected species.
+                    conn.execute(
+                        "DELETE FROM reference_images WHERE (pet_id=? OR detection_id IN "
+                        "(SELECT value FROM json_each(?))) AND EXISTS "
+                        "(SELECT 1 FROM detections d JOIN pets p "
+                        "ON p.id=reference_images.pet_id WHERE d.id=detection_id "
+                        "AND d.species<>p.species)",
+                        (pet_id, corrected),
+                    )
+                    saved = conn.execute(
+                        "SELECT value FROM state WHERE key='last_group_action'"
+                    ).fetchone()
+                    action = json.loads(saved[0]) if saved else None
+                    if action:
+                        related = {action.get("pet_id")}
+                        for row in action["rows"]:
+                            related.add(row.get("pet_id"))
+                            for key in ("references", "after_references"):
+                                related.update(ref["pet_id"] for ref in row.get(key, []))
+                        if pet_id in related:
+                            # A later species edit must not be undone by an older naming action.
+                            conn.execute(
+                                "UPDATE state SET value='null' WHERE key='last_group_action'"
+                            )
+                self._review_changed(conn)
+            self.gallery_changed()
+            return pet
+
     def decide(
         self, detection_id, pet_id, status, learn=True, expected_pet_id=None, expected_status=None
     ):
@@ -1363,13 +1445,18 @@ class Service:
 
     def _current_tag_operation(self, row):
         current = self.store.one(
-            "SELECT r.pet_id,r.status,r.published,d.revision FROM reviews r "
+            "SELECT r.pet_id,r.status,r.published,d.revision,p.tag FROM reviews r "
             "JOIN detections d ON d.id=r.detection_id JOIN assets a ON a.id=d.asset_id "
+            "LEFT JOIN pets p ON p.id=r.pet_id "
             "WHERE r.detection_id=? AND r.model=? AND d.detector=? AND d.revision=a.revision",
             (row["detection_id"], row["model"], self.settings.detector_key),
         )
-        return current and all(
-            current[key] == row[key] for key in ("pet_id", "status", "published", "revision")
+        return (
+            current
+            and all(
+                current[key] == row[key] for key in ("pet_id", "status", "published", "revision")
+            )
+            and ("tag" not in row or current["tag"] == row["tag"])
         )
 
     def _tag_change_failed(self, row, error):

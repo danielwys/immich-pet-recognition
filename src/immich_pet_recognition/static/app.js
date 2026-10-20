@@ -1360,6 +1360,116 @@ $("detail-toggle").addEventListener("click", () => {
       : new Set(detailGroup.members.map((row) => row.id));
   renderDetailSelection();
 });
+function petSettings(pet) {
+  const card = el("div", "pet-setting"),
+    row = el("div", "setting-row"),
+    label = el("div", "pet-setting-label"),
+    description = el("div"),
+    title = el("strong", "", pet.name),
+    kind = el("p", "", pet.species === "cat" ? "Cat" : "Dog"),
+    actions = el("div", "pet-setting-actions"),
+    form = el("form", "settings-form pet-edit-form hidden");
+  form.id = "edit-pet-" + pet.id;
+  form.setAttribute("aria-label", "Edit " + pet.name);
+  description.append(title, kind);
+  label.append(image(pet.cover_id, "", "nav-avatar", 160), description);
+  const nameLabel = el("label", "", "Name"),
+    name = el("input"),
+    speciesLabel = el("label", "", "Species"),
+    species = el("select");
+  name.required = true;
+  name.maxLength = 64;
+  name.autocomplete = "off";
+  nameLabel.append(name);
+  [
+    ["dog", "Dog"],
+    ["cat", "Cat"],
+  ].forEach(([value, text]) => {
+    const option = el("option", "", text);
+    option.value = value;
+    species.append(option);
+  });
+  speciesLabel.append(species);
+  const close = () => {
+    form.classList.add("hidden");
+    edit.setAttribute("aria-expanded", "false");
+  };
+  const edit = button(
+    "Edit",
+    "text-button",
+    () => {
+      if (!form.classList.contains("hidden")) return close();
+      const current = petById(pet.id) || pet;
+      name.value = current.name;
+      species.value = current.species;
+      form.classList.remove("hidden");
+      edit.setAttribute("aria-expanded", "true");
+      name.focus();
+    },
+    "Edit " + pet.name,
+  );
+  edit.setAttribute("aria-expanded", "false");
+  edit.setAttribute("aria-controls", form.id);
+  const toggle = button("", "switch", async () => {
+    const enabled = toggle.getAttribute("aria-checked") !== "true";
+    toggle.setAttribute("aria-checked", String(enabled));
+    try {
+      await api("pets/" + pet.id + "/automation", {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      });
+      pet.auto_tag = enabled;
+    } catch (error) {
+      toggle.setAttribute("aria-checked", String(!enabled));
+      showError(error);
+    }
+  });
+  toggle.setAttribute("role", "switch");
+  toggle.setAttribute("aria-label", "Automatic sorting for " + pet.name);
+  toggle.setAttribute("aria-checked", String(pet.auto_tag));
+  const save = el("button", "primary", "Save changes"),
+    cancel = button("Cancel", "secondary", close),
+    buttons = el("div", "pet-edit-actions");
+  save.type = "submit";
+  cancel.type = "button";
+  buttons.append(save, cancel);
+  form.append(nameLabel, speciesLabel, buttons);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = { name: name.value, species: species.value };
+    [save, cancel, name, species, edit].forEach(
+      (control) => (control.disabled = true),
+    );
+    try {
+      const updated = await api("pets/" + pet.id, {
+        method: "PUT",
+        body: JSON.stringify(values),
+      });
+      Object.assign(pet, updated);
+      const current = petById(pet.id);
+      if (current) Object.assign(current, updated);
+      title.textContent = pet.name;
+      kind.textContent = pet.species === "cat" ? "Cat" : "Dog";
+      edit.setAttribute("aria-label", "Edit " + pet.name);
+      form.setAttribute("aria-label", "Edit " + pet.name);
+      toggle.setAttribute("aria-label", "Automatic sorting for " + pet.name);
+      close();
+      renderNavigation();
+      toast(pet.name + " updated");
+      refreshStatus().catch(() => {});
+    } catch (error) {
+      showError(error);
+    } finally {
+      [save, cancel, name, species, edit].forEach(
+        (control) => (control.disabled = false),
+      );
+    }
+  });
+  actions.append(edit, toggle);
+  row.append(label, actions);
+  card.append(row, form);
+  return card;
+}
 function renderSettings() {
   $("view").replaceChildren();
   heading("Settings");
@@ -1403,33 +1513,7 @@ function renderSettings() {
   });
   row.append(copy, profile);
   sorting.append(row);
-  pets.forEach((pet) => {
-    const r = el("div", "setting-row"),
-      label = el("div");
-    label.append(
-      image(pet.cover_id, "", "nav-avatar", 160),
-      el("strong", "", pet.name),
-    );
-    const toggle = button("", "switch", async () => {
-      const enabled = toggle.getAttribute("aria-checked") !== "true";
-      toggle.setAttribute("aria-checked", String(enabled));
-      try {
-        await api("pets/" + pet.id + "/automation", {
-          method: "PUT",
-          body: JSON.stringify({ enabled }),
-        });
-        pet.auto_tag = enabled;
-      } catch (error) {
-        toggle.setAttribute("aria-checked", String(!enabled));
-        showError(error);
-      }
-    });
-    toggle.setAttribute("role", "switch");
-    toggle.setAttribute("aria-label", "Automatic sorting for " + pet.name);
-    toggle.setAttribute("aria-checked", String(pet.auto_tag));
-    r.append(label, toggle);
-    sorting.append(r);
-  });
+  pets.forEach((pet) => sorting.append(petSettings(pet)));
   container.append(sorting);
   const add = el("section", "settings-section");
   add.append(el("h2", "", "Add a pet"));

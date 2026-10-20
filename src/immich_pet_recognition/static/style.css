@@ -941,6 +941,35 @@ main {
   width: 32px;
   height: 32px;
 }
+.pet-setting-label,
+.pet-setting-actions,
+.pet-edit-actions {
+  display: flex;
+  align-items: center;
+}
+.pet-setting-label {
+  min-width: 0;
+}
+.pet-setting-label strong {
+  overflow-wrap: anywhere;
+}
+.pet-setting-label .nav-avatar {
+  flex-shrink: 0;
+}
+.pet-setting-actions {
+  gap: 12px;
+  flex-shrink: 0;
+}
+.pet-edit-form {
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+.pet-edit-actions {
+  gap: 8px;
+  width: 100%;
+}
 .settings-note {
   font-size: 12px;
 }
