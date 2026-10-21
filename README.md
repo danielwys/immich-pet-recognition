@@ -103,8 +103,10 @@ can stay here; there is no requirement to clear a review queue before enjoying t
 
 Naming and correction update the interface while recognition and Immich tag sync run in the
 background. The current gallery stays available during sorting. Undo is available for the latest
-batch action, and a small activity indicator opens progress and retry details. Failed writes and
-pending removals survive restart.
+batch action, and a small activity indicator opens progress and retry details. Unpublished tags
+and pending removals survive restart. Review selections keep working when a page is left open or
+the server restarts. Each save still checks the current photos and protects identities that have
+already been assigned elsewhere.
 
 Every manual name or correction improves recognition automatically, including older names.
 There is no reference checkbox, enrollment step, or training/validation choice. Automatic results

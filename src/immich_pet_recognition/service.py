@@ -1072,16 +1072,20 @@ class Service:
                 self.group_snapshots = {"pipeline": (model, self.settings.detector_key)}
             snapshots = self.group_snapshots.setdefault("items", {})
             now = time.monotonic()
-            # Bounded, temporary selection snapshots, not a history of labels.
-            snapshots = {key: value for key, value in snapshots.items() if now - value[0] < 3600}
-            self.group_snapshots["items"] = snapshots
             tracked = {
                 member["id"] for _, group in snapshots.values() for member in group["members"]
             }
             unseen = [row for row in rows if row["id"] not in tracked]
             for row in unseen:
                 row["vector"] = np.frombuffer(row["vector"], dtype=np.float32)
-            for group in similar_groups(unseen):
+            fresh = similar_groups(unseen)
+            self._remember_selections(
+                [
+                    {"id": group["id"], "member_ids": sorted(row["id"] for row in group["members"])}
+                    for group in fresh
+                ]
+            )
+            for group in fresh:
                 snapshots[group["id"]] = (now, group)
             names = {pet["id"]: pet["name"] for pet in self.store.rows("SELECT id,name FROM pets")}
             groups = []
@@ -1119,6 +1123,91 @@ class Service:
                 self.group_cache = (revision, groups)
             return groups
 
+    def _remember_selections(self, groups):
+        if not groups:
+            return
+        # Only photo IDs are saved, never old identities or scores. A page can
+        # submit exactly what it showed even after a worker or service restart.
+        with self.store.connection() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO review_selections VALUES (?,?,?,?)",
+                [
+                    (
+                        group["id"],
+                        self.settings.recognizer_key,
+                        self.settings.detector_key,
+                        json.dumps(sorted(group["member_ids"])),
+                    )
+                    for group in groups
+                ],
+            )
+
+    def restore_selections(self, pipeline, groups):
+        if pipeline != self.settings.pipeline_key:
+            raise ValueError("These photos were analyzed by a different model")
+        if sum(len(group["member_ids"]) for group in groups) > 5000:
+            raise ValueError("Restore up to 5,000 photo selections at a time")
+        for group in groups:
+            ids = sorted(group["member_ids"])
+            if (
+                len(set(ids)) != len(ids)
+                or hashlib.sha256("|".join(ids).encode()).hexdigest()[:24] != group["id"]
+            ):
+                raise ValueError("The selection does not match its photo IDs")
+        self._remember_selections(groups)
+        return {"restored": len(groups)}
+
+    def _selection_ids(self, group_id):
+        with self.group_lock:
+            if self.group_snapshots.get("pipeline") == (
+                self.settings.recognizer_key,
+                self.settings.detector_key,
+            ):
+                entry = self.group_snapshots.get("items", {}).get(group_id)
+                if entry is not None:
+                    return {row["id"] for row in entry[1]["members"]}
+        saved = self.store.one(
+            "SELECT members FROM review_selections WHERE id=? AND model=? AND detector=?",
+            (group_id, self.settings.recognizer_key, self.settings.detector_key),
+        )
+        return set(json.loads(saved["members"])) if saved else None
+
+    def group(self, group_id):
+        ids = self._selection_ids(group_id)
+        if ids is None:
+            # Compatibility with a page served before durable selections existed.
+            self.groups()
+            ids = self._selection_ids(group_id)
+        if ids is None:
+            return None
+        members = self.store.rows(
+            "SELECT d.id,d.asset_id,d.species,a.name,r.pet_id,r.score,r.margin "
+            "FROM reviews r JOIN detections d ON d.id=r.detection_id "
+            "JOIN assets a ON a.id=d.asset_id WHERE d.id IN "
+            "(SELECT value FROM json_each(?)) AND r.model=? AND d.detector=? "
+            "AND d.revision=a.revision AND r.status='pending' ORDER BY r.score DESC,d.id",
+            (json.dumps(sorted(ids)), self.settings.recognizer_key, self.settings.detector_key),
+        )
+        if not members:
+            return None
+        choices = {}
+        for member in members:
+            choices[member["pet_id"]] = choices.get(member["pet_id"], 0) + 1
+        pet_id = max(choices, key=choices.get)
+        pet = self.store.one("SELECT name FROM pets WHERE id=?", (pet_id,))
+        indexes = sorted(set([0, len(members) // 3, 2 * len(members) // 3, len(members) - 1]))
+        return {
+            "id": group_id,
+            "pet_id": pet_id,
+            "pet_name": pet["name"] if pet else None,
+            "species": members[0]["species"],
+            "members": members,
+            "crop_count": len(members),
+            "photo_count": len({row["asset_id"] for row in members}),
+            "asset_ids": sorted({row["asset_id"] for row in members}),
+            "samples": [members[index] for index in indexes],
+        }
+
     def _references_for(self, detection_id):
         return self.store.rows(
             "SELECT pet_id,kind FROM reference_images WHERE detection_id=? ORDER BY pet_id,kind",
@@ -1133,17 +1222,21 @@ class Service:
         # all remaining suggestions here made each save slow during recognition.
         excluded = excluded or {}
         ids = set()
-        with self.group_lock:
-            snapshots = self.group_snapshots.get("items", {})
-            for group_id in group_ids:
-                entry = snapshots.get(group_id)
-                if entry is None or time.monotonic() - entry[0] >= 3600:
-                    raise ValueError("This selection expired. Refresh to see the current photos.")
-                members = {row["id"] for row in entry[1]["members"]}
-                omitted = set(excluded.get(group_id, []))
-                if not omitted <= members:
-                    raise ValueError("An excluded photo is not in this group")
-                ids.update(members - omitted)
+        rebuilt = False
+        for group_id in group_ids:
+            members = self._selection_ids(group_id)
+            if members is None and not rebuilt:
+                self.groups()
+                rebuilt = True
+                members = self._selection_ids(group_id)
+            if members is None:
+                raise ValueError(
+                    "This selection could not be found. Reload the photos before naming it."
+                )
+            omitted = set(excluded.get(group_id, []))
+            if not omitted <= members:
+                raise ValueError("An excluded photo is not in this group")
+            ids.update(members - omitted)
         if not ids:
             raise ValueError("Select at least one photo")
         if len(ids) > 5000:

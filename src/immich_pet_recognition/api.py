@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import re
 import secrets
 import sqlite3
 import tempfile
@@ -76,6 +77,23 @@ class GroupBatchDecision(WriteOperation):
         if len(set(values)) != len(values):
             raise ValueError("Each group can appear only once in a batch")
         return values
+
+
+class ReviewSelection(BaseModel):
+    id: str = Field(pattern=r"^[a-f0-9]{24}$")
+    member_ids: list[str] = Field(min_length=1, max_length=200)
+
+    @field_validator("member_ids")
+    @classmethod
+    def detection_ids(cls, values):
+        if any(not re.fullmatch(r"[a-f0-9]{32}", value) for value in values):
+            raise ValueError("Use valid photo identifiers")
+        return values
+
+
+class ReviewSelections(BaseModel):
+    pipeline: str = Field(min_length=1, max_length=512)
+    groups: list[ReviewSelection] = Field(min_length=1, max_length=5000)
 
 
 class Decision(BaseModel):
@@ -292,10 +310,21 @@ def create_app(settings: Settings | None = None, service: Service | None = None)
 
     @app.get("/api/groups/{group_id}", dependencies=auth)
     def group_detail(group_id: str):
-        row = next((row for row in service.groups() or [] if row["id"] == group_id), None)
+        row = service.group(group_id)
         if not row:
-            raise HTTPException(409, "This group changed. Refresh to see the current photos.")
+            raise HTTPException(
+                409, "These photos have already been handled or are no longer available."
+            )
         return row
+
+    @app.post("/api/groups/selections", dependencies=auth)
+    def restore_selections(body: ReviewSelections):
+        try:
+            return service.restore_selections(
+                body.pipeline, [group.model_dump() for group in body.groups]
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
 
     @app.post("/api/groups/{group_id}/decision", dependencies=auth)
     def group_decision(group_id: str, body: GroupDecision):
